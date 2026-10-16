@@ -35,22 +35,21 @@ import test_orca_reload as fixtures  # noqa: E402
 from test_build import make_template  # noqa: E402
 
 REPO_MODULE = "orca_test"
-ADDON = f"bl_ext.{REPO_MODULE}.orca_reload"
+ADDON = f"bl_ext.{REPO_MODULE}.orca_3mf"
 
 
 def enable_addon():
     """Stages the add-on at the folder name Blender expects and enables it from there.
 
-    Blender finds an extension at <repo>/<id>/, and this checkout names its folder after the repository
-    (orca_3mf), not the add-on id (orca_reload). Stage a copy under the expected name so the extension
-    system discovers it without renaming anything in the tree.
+    Blender finds an extension at <repo>/<id>/. Stage a clean copy there (without __pycache__) so the test
+    does not depend on how the checkout is registered in Blender.
     """
     bpy.context.preferences.use_preferences_save = False
     repos = bpy.context.preferences.extensions.repos
     if not any(r.module == REPO_MODULE for r in repos):
-        repo_dir = tempfile.mkdtemp(prefix="orca_reload_repo_")
+        repo_dir = tempfile.mkdtemp(prefix="orca_3mf_repo_")
         atexit.register(shutil.rmtree, repo_dir, ignore_errors=True)
-        shutil.copytree(EXT_DIR, os.path.join(repo_dir, "orca_reload"),
+        shutil.copytree(EXT_DIR, os.path.join(repo_dir, "orca_3mf"),
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         repos.new(name=REPO_MODULE, module=REPO_MODULE, custom_directory=repo_dir, source='USER')
     if addon_utils.enable(ADDON, default_set=True, handle_error=None) is None:
@@ -256,7 +255,7 @@ class OrcaTabTest(unittest.TestCase):
         self.assertIn("(rebuilt)", report)
 
     def test_stl_root_falls_back_to_combi_export(self):
-        from bl_ext.orca_test.orca_reload import props
+        from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene
         scene.orca_reload.stl_root = ""
         added = not hasattr(bpy.types.Scene, "batch_stl_root_dir")
@@ -286,7 +285,7 @@ class OrcaTabTest(unittest.TestCase):
 
     def test_panels_draw(self):
         """Draws every panel and list row into a stand-in layout that checks each property, operator and icon."""
-        from bl_ext.orca_test.orca_reload import ui
+        from bl_ext.orca_test.orca_3mf import ui
         icons = set(bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items.keys())
         self.assertFalse(set(ui.ICONS.values()) - icons)
         test = self

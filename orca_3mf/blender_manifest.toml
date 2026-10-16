@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 
-id = "orca_reload"
+id = "orca_3mf"
 version = "0.2.0"
-name = "Orca Reload"
+name = "Orca 3MF"
 tagline = "Build OrcaSlicer projects with plates, nesting and seams"
 maintainer = "Oleroma"
 type = "add-on"
