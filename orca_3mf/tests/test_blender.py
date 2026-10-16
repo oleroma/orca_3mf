@@ -1,6 +1,7 @@
-"""Tests for the Orca tab in Blender. Run with a Python that has the bpy module (Blender 5.2 or newer):
+"""Tests for the Orca tab in Blender. Run under Blender itself, since the bpy module is only available inside
+Blender (Blender 5.2 or newer):
 
-    python -I extensions/orca_reload/tests/test_blender.py
+    blender -b -P orca_3mf/tests/test_blender.py
 
 Grip.blend is not opened. Each test builds a box part and writes its STL like Combi Export does (world space), sets
 up a project with the tab's operators and properties, and presses Build or Import.
@@ -17,8 +18,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXT_DIR = os.path.dirname(HERE)
-EXTENSIONS = os.path.dirname(EXT_DIR)
-REPO = os.path.dirname(EXTENSIONS)
+ROOT = os.path.dirname(EXT_DIR)
 
 # Keep Blender's user folders out of the real ones, and no __pycache__ in the repository
 _USER = tempfile.mkdtemp(prefix="orca_reload_test_")
@@ -29,7 +29,7 @@ sys.dont_write_bytecode = True
 import bpy  # noqa: E402
 import addon_utils  # noqa: E402  (comes with bpy)
 
-sys.path.insert(0, os.path.join(REPO, "tools", "orca_reload"))
+sys.path.insert(0, os.path.join(ROOT, "tools", "orca_reload"))
 sys.path.insert(0, HERE)
 import test_orca_reload as fixtures  # noqa: E402
 from test_build import make_template  # noqa: E402
@@ -39,11 +39,20 @@ ADDON = f"bl_ext.{REPO_MODULE}.orca_reload"
 
 
 def enable_addon():
-    """Adds the extensions folder as a local repository and enables the add-on from it."""
+    """Stages the add-on at the folder name Blender expects and enables it from there.
+
+    Blender finds an extension at <repo>/<id>/, and this checkout names its folder after the repository
+    (orca_3mf), not the add-on id (orca_reload). Stage a copy under the expected name so the extension
+    system discovers it without renaming anything in the tree.
+    """
     bpy.context.preferences.use_preferences_save = False
     repos = bpy.context.preferences.extensions.repos
     if not any(r.module == REPO_MODULE for r in repos):
-        repos.new(name=REPO_MODULE, module=REPO_MODULE, custom_directory=EXTENSIONS, source='USER')
+        repo_dir = tempfile.mkdtemp(prefix="orca_reload_repo_")
+        atexit.register(shutil.rmtree, repo_dir, ignore_errors=True)
+        shutil.copytree(EXT_DIR, os.path.join(repo_dir, "orca_reload"),
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        repos.new(name=REPO_MODULE, module=REPO_MODULE, custom_directory=repo_dir, source='USER')
     if addon_utils.enable(ADDON, default_set=True, handle_error=None) is None:
         raise RuntimeError(f"could not enable {ADDON}")
 
@@ -235,7 +244,7 @@ class OrcaTabTest(unittest.TestCase):
         settings = bpy.context.scene.orca_reload
         self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
         imported = settings.projects[settings.project_index]
-        self.assertEqual((imported.name, imported.folder, imported.stl_folder), ("GripV_parts", "GripV",
+        self.assertEqual((imported.name, imported.folder, imported.stl_folder), ("GripV_parts.3mf", "GripV",
                                                                                "GripV/parts"))
         self.assertEqual(len(imported.plates), 2)
         part = imported.plates[1].parts[0]
@@ -340,4 +349,6 @@ class OrcaTabTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # Run through Blender (`blender -b -P test_blender.py`), whose Python exposes the full command line in
+    # sys.argv; pass an explicit argv so unittest does not try to parse Blender's own flags.
+    unittest.main(argv=[os.path.abspath(__file__)], verbosity=2)

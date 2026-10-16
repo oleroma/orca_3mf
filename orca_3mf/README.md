@@ -12,7 +12,7 @@ The setup is saved in the .blend file. The tab is laid out like Combi Export: th
 | Info | The log of the last build or import, and a short guide. |
 | Projects | One row per 3MF file: its Build button, tick, name and folder. Below the list, the active project's STL folder and **Settings from**. |
 | Plates | One row per Orca plate: tick, number, name, **gap** and STL folder. |
-| Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Copies** and **Seam**. |
+| Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Copies**, **Mirror** and **Seam**. |
 
 A part's STL is found at STL root / project's STL folder / plate's STL folder / the part's path, with `/` between folders. So a project whose STL folder is `GripV/parts` and a plate whose STL folder is `buttons/default` take `cap_default/circle.stl` from `GripV/parts/buttons/default/cap_default/circle.stl`.
 
@@ -23,6 +23,7 @@ The **+** of the Parts list opens a file browser: pick one or more STLs, each be
 - **Up**: the part's direction, in Blender as exported, that points up on the plate. `0, 0, 1` prints it as it stands in Blender, `0, 0, -1` upside down, `0, 1, 0` on its front face (Blender's front is −Y).
 - **Turn**: then turns it around that axis.
 - **Copies**: how many of it go on the plate.
+- **Mirror**: mirror the part across its own X axis (a part mirrored in Orca imports with this ticked, and builds back mirrored).
 
 Each plate is nested on its own: parts are stood up, set on the bed, and placed by their footprint, largest first, **gap** apart and half a gap from the edges, as a compact block in the middle of the plate. A part that does not fit stops the build and the log says which. The plates are laid out the way Orca lays them out, so each part lands on its plate.
 
@@ -46,9 +47,12 @@ A **new** project takes its printer, process and filament settings from **Settin
 An **existing** project is written over, and keeps:
 
 - its printer, process and filament settings, and the files Orca keeps with them
-- each part's own settings, matched by name (for example wall loops or infill set on a part in Orca)
-- each plate's settings, by position (for example its bed type)
+- each part's own settings, matched by shape, then source file, then plate, then name (for example wall loops or infill set on a part in Orca)
+- each plate's settings, by name (for example its bed type)
 - the painting of a part whose shape did not change (supports, colours, and its seams when it has no Seam line)
+- modifiers, negative parts and support blockers made in Orca (their meshes and settings, re-anchored to the part)
+- variable layer heights, height range modifiers and brim ears (`layer_heights_profile.txt`, `layer_config_ranges.xml`, `brim_ear_points.txt`), re-keyed to the part's new position
+- per-layer custom G-code (`custom_gcode_per_layer.xml`), re-keyed to the plate's new position
 
 Each part's place on the plate is set again by the nesting. Objects made of several STLs are not built, and what Build does not keep yet is listed under Not done yet.
 
@@ -62,7 +66,7 @@ Each part's place on the plate is set again by the nesting. Objects made of seve
 | --- | --- |
 | `build3mf.py` | Writes projects from projects › plates › parts, and reads an existing project's layout for Import. No Blender needed. |
 | `layout.py` | Up axis and turn to a rotation, footprints, nesting, and Orca's plate grid. No Blender needed. |
-| `reload3mf.py` | Reads Orca projects and reloads STLs into them; the command line tool [tools/orca_reload](../../tools/orca_reload/README.md) runs it. No Blender needed. |
+| `reload3mf.py` | Reads Orca projects and reloads STLs into them; the command line tool [tools/orca_reload](../tools/orca_reload/README.md) runs it. No Blender needed. |
 | `seams.py` | Seam lines to Orca's seam painting: each triangle near the line is split until the painted strip follows it. No Blender needed. |
 | `blender_seams.py` | Reads a seam line from a curve or mesh. |
 | `props.py` | What the .blend saves, and how the paths are joined. |
@@ -77,18 +81,15 @@ Orca stores each part's mesh centred on itself, and the part's place and rotatio
 - Nesting by outline: parts are nested by their bounding box, so L-shaped parts leave space unused.
 - Curves made by Geometry Nodes: a curve object's modifiers are ignored. A mesh object with Geometry Nodes works when its nodes output mesh edges (add Curve to Mesh).
 - NURBS curves follow their control points, not the smooth curve.
-- Mirrored parts: Import brings a part mirrored in Orca back unmirrored, and scale set in Orca is dropped.
-- Modifiers, negative parts and support blockers added in Orca are removed by Build, and so are variable layer heights, height range modifiers and brim ears.
-- Parts with the same name (the tight and loose versions of a part) take Orca's part settings in file order, not by shape.
-- Plate settings (bed type) and custom G-code stay with the plate's position: unticking or moving a plate moves them to another plate.
-- Bed exclude areas, round beds and the printer's height are not checked.
+- Scale set in Orca is dropped on Import.
+- Bed exclude areas are only warned about, not honoured when nesting; round and non-rectangular beds nest on their bounding box.
 
 ## Tests
 
 ```
-python -I extensions/orca_reload/tests/test_build.py
-python -I extensions/orca_reload/tests/test_seams.py
-python -I extensions/orca_reload/tests/test_blender.py
+python -I orca_3mf/tests/test_build.py
+python -I orca_3mf/tests/test_seams.py
+blender -b -P orca_3mf/tests/test_blender.py
 python -m unittest discover tools/orca_reload
 ```
 

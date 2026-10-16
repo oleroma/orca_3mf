@@ -18,7 +18,7 @@ The original project is never overwritten. The result is written next to it as `
 
 > Inside Orca, right-clicking a plate and choosing **Reload All** reloads every part of the open project. This tool is for doing many projects at once, or without opening Orca.
 
-In Blender, the [Orca Reload extension](../../extensions/orca_reload/README.md) goes further: it builds whole projects from plates and parts set up in Blender, nests the parts and paints seams drawn as curves. This command only reloads; its code lives in that extension (`extensions/orca_reload/reload3mf.py`) and runs here without Blender.
+In Blender, the [Orca Reload extension](../../orca_3mf/README.md) goes further: it builds whole projects from plates and parts set up in Blender, nests the parts and paints seams drawn as curves. This command only reloads; its code lives in that extension (`orca_3mf/reload3mf.py`) and runs here without Blender.
 
 ## Use
 

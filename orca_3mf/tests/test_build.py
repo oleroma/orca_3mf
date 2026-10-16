@@ -1,6 +1,6 @@
 """Tests for layout.py and build3mf.py (placing parts and writing Orca projects). Plain Python, no Blender:
 
-    python -I extensions/orca_reload/tests/test_build.py
+    python -I orca_3mf/tests/test_build.py
 """
 import json
 import math
@@ -16,7 +16,7 @@ sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXT_DIR = os.path.dirname(HERE)
 sys.path.insert(0, EXT_DIR)
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(EXT_DIR)), "tools", "orca_reload"))
+sys.path.insert(0, os.path.join(os.path.dirname(EXT_DIR), "tools", "orca_reload"))
 
 import build3mf  # noqa: E402
 import layout  # noqa: E402
@@ -26,16 +26,17 @@ import test_orca_reload as fixtures  # noqa: E402
 A1_AREA = ["0x0", "256x0", "256x256", "0x256"]
 
 
-def make_template(path, area=A1_AREA, version="2.4.2"):
+def make_template(path, area=A1_AREA, version="2.4.2", **extra):
     """The smallest Orca project that carries printer settings."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    cfg = {"printable_area": area, "printer_model": "Bambu Lab A1", "filament_colour": ["#FFFFFF"]}
+    cfg.update(extra)
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(reload3mf.ROOT_MODEL, fixtures.HEADER.replace(
             ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n',
             ' <metadata name="Application">BambuStudio-02.06.00.51</metadata>\n'
             ' <metadata name="OrcaSlicer">%s</metadata>\n' % version) + " <resources/>\n <build/>\n</model>\n")
-        z.writestr(build3mf.SETTINGS, json.dumps({"printable_area": area, "printer_model": "Bambu Lab A1",
-                                                  "filament_colour": ["#FFFFFF"]}))
+        z.writestr(build3mf.SETTINGS, json.dumps(cfg))
         z.writestr("Metadata/filament_settings_1.config", "{}")
 
 
@@ -315,6 +316,157 @@ class BuildTest(unittest.TestCase):
         self.assertAlmostEqual((lo[0] + hi[0]) / 2, 0.0, places=4)  # centred on the bed
         lo, hi = placed["c.stl"]
         self.assertAlmostEqual((lo[0] + hi[0]) / 2, 180 * 1.2, places=4)  # second plate, 180 mm bed
+
+    def add_object_setting(self, source, key, value):
+        """Adds an object-level metadata key (in the <object> block) to the part whose source_file is `source`,
+        as if it had been changed in Orca."""
+        text = self.settings_xml()
+        si = text.index('source_file" value="%s"' % source)
+        oi = text.rindex('<object id=', 0, si)
+        ni = text.index('key="name"', oi, si)
+        ei = text.index('/>', ni) + 2
+        text = text[:ei] + '\n    <metadata key="%s" value="%s"/>' % (key, value) + text[ei:]
+        self.replace_entry(reload3mf.MODEL_SETTINGS, text)
+
+    def object_block(self, source):
+        text = self.settings_xml()
+        si = text.index('source_file" value="%s"' % source)
+        oi = text.rindex('<object id=', 0, si)
+        return text[oi:text.index('</object>', oi)]
+
+    def test_mirror_survives_import(self):
+        plates = [build3mf.PlateSpec("p", 5, [
+            build3mf.PartSpec("a.stl", self.stls["a"], (0, 0, 1), 0.0, 1, mirror=True),
+            build3mf.PartSpec("b.stl", self.stls["b"], (0, 1, 0), math.radians(90), 1, mirror=False)])]
+        self.build(self.spec(plates))
+        plates_out, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([os.path.join(self.dir, "stl")]))
+        self.assertEqual(problems, [])
+        a = next(p for p in plates_out[0][1] if p.stl == self.stls["a"])
+        b = next(p for p in plates_out[0][1] if p.stl == self.stls["b"])
+        self.assertTrue(a.mirror)
+        self.assertFalse(b.mirror)
+        self.assertTrue(close(a.up, (0, 0, 1)))
+        self.assertTrue(close(b.up, (0, 1, 0)))
+        self.assertAlmostEqual(b.angle, math.radians(90), places=6)
+
+    def test_plate_settings_follow_the_name_when_reordered(self):
+        self.build()
+        text = self.settings_xml().replace(
+            '<metadata key="plater_name" value="first"/>',
+            '<metadata key="plater_name" value="first"/>\n'
+            '    <metadata key="curr_bed_type" value="Textured PEI Plate"/>')
+        self.replace_entry(reload3mf.MODEL_SETTINGS, text)
+        plates = self.spec().plates
+        self.build(self.spec([plates[1], plates[0]]))
+        text = self.settings_xml()
+        block = text[text.index('plater_name" value="first"'):text.index('</plate>',
+                                                                    text.index('plater_name" value="first"'))]
+        self.assertIn('curr_bed_type" value="Textured PEI Plate"', block)
+
+    def test_same_named_parts_keep_settings_by_shape(self):
+        tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
+        loose = self.write("knob", (10.4, 10.4, 10), (0, 0, 5), "loose")
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", tight),
+                                                          build3mf.PartSpec("knob.stl", loose)])]))
+        self.add_object_setting(tight, "wall_loops", "6")
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", loose),
+                                                          build3mf.PartSpec("knob.stl", tight)])]))
+        self.assertIn('wall_loops" value="6"', self.object_block(tight))
+        self.assertNotIn('wall_loops', self.object_block(loose))
+
+    def test_part_taller_than_printable_height_is_reported(self):
+        make_template(self.template, printable_height="30")
+        plates = [build3mf.PlateSpec("p", 5, [build3mf.PartSpec("b.stl", self.stls["b"], (0, 0, 1))])]
+        lines, written = build3mf.build(self.spec(plates))
+        self.assertFalse(written)
+        self.assertTrue(any("printable height" in line for line in lines), lines)
+
+    def test_non_rect_bed_and_exclude_area_warn(self):
+        make_template(self.template, area=["0x0", "256x0", "180x180", "0x256"], bed_exclude_area="10x10,20x20")
+        lines = self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", self.stls["a"])])]))
+        self.assertTrue(any("not a rectangle" in line for line in lines), lines)
+        self.assertTrue(any("bed exclude areas" in line for line in lines), lines)
+
+    def rewrite(self, **entries):
+        """Rewrite the built zip, replacing or adding the given entries (str or bytes)."""
+        tmp = self.out + ".tmp"
+        with zipfile.ZipFile(self.out) as src, zipfile.ZipFile(tmp, "w") as dst:
+            for info in src.infolist():
+                data = entries.pop(info.filename, None)
+                if data is None:
+                    data = src.read(info.filename)
+                elif isinstance(data, str):
+                    data = data.encode("utf-8")
+                dst.writestr(info, data)
+            for name, data in entries.items():
+                dst.writestr(name, data.encode("utf-8") if isinstance(data, str) else data)
+        os.replace(tmp, self.out)
+
+    def test_extra_volumes_and_index_files_survive_rebuild(self):
+        self.build()
+        base = self.spec()
+        root = zipfile.ZipFile(self.out).read(reload3mf.ROOT_MODEL).decode()
+        cfg = self.settings_xml()
+
+        # An extra modifier volume on object "a" (index 1): a second component, a sub-model and a <part>,
+        # the way Orca stores a modifier / negative part / support blocker on a normal part.
+        extra_model = (fixtures.HEADER + ' <resources>\n  <object id="999" '
+                       'p:UUID="99999999-ffff-4c03-9d28-80fed5dfa1dc" type="model">\n'
+                       '   <mesh>\n    <vertices>\n     <vertex x="0" y="0" z="0"/>\n'
+                       '     <vertex x="1" y="0" z="0"/>\n     <vertex x="0" y="1" z="0"/>\n'
+                       '    </vertices>\n    <triangles>\n     <triangle v1="0" v2="1" v3="2"/>\n'
+                       '    </triangles>\n   </mesh>\n  </object>\n </resources>\n <build/>\n</model>\n')
+        root = root.replace(
+            'transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n   </components>',
+            'transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
+            '    <component p:path="/3D/Objects/extra.model" objectid="999" '
+            'p:UUID="aaaa0001-b206-40ff-9872-83e8017abed1" transform="1 0 0 0 1 0 0 0 1 5 5 5"/>\n'
+            '   </components>', 1)
+        cfg = cfg.replace(
+            '    </part>\n  </object>',
+            '    </part>\n'
+            '    <part id="999" subtype="modifier_part">\n'
+            '      <metadata key="name" value="a.stl"/>\n'
+            '      <metadata key="matrix" value="1 0 0 5 0 1 0 5 0 0 1 5 0 0 0 1"/>\n'
+            '      <metadata key="wall_loops" value="9"/>\n'
+            '      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" '
+            'facets_reversed="0" backwards_edges="0"/>\n'
+            '    </part>\n  </object>', 1)
+        self.rewrite(**{
+            reload3mf.ROOT_MODEL: root,
+            reload3mf.MODEL_SETTINGS: cfg,
+            "3D/Objects/extra.model": extra_model,
+            "Metadata/layer_heights_profile.txt": "id=2|0.1;0.1;0.1;0.1;0.1;0.1\n",
+            "Metadata/layer_config_ranges.xml":
+                '<?xml version="1.0" encoding="UTF-8"?>\n<objects>\n'
+                ' <object id="2">\n  <range min_z="0" max_z="1">\n'
+                '   <option opt_key="layer_height">0.1</option>\n  </range>\n </object>\n</objects>\n',
+            "Metadata/brim_ear_points.txt": "brim_points_format_version=0\nobject_id=3|1 2 3 0.5 4 5 6 0.5\n",
+            "Metadata/custom_gcode_per_layer.xml":
+                '<?xml version="1.0" encoding="UTF-8"?>\n<custom_gcodes_per_layer>\n'
+                ' <plate>\n  <plate_info id="2"/>\n'
+                '  <layer top_z="1.0" type="2" extruder="1" color="#FFFFFF" extra="" gcode="M600"/>\n'
+                '  <mode value="SingleExtruder"/>\n </plate>\n</custom_gcodes_per_layer>\n',
+        })
+
+        # Swap the plates: c (old 3) -> 1, a (old 1) -> 2, b (old 2) -> 3; plate "second" -> position 1
+        self.build(self.spec([base.plates[1], base.plates[0]]))
+        with zipfile.ZipFile(self.out) as z:
+            out_root = z.read(reload3mf.ROOT_MODEL).decode()
+            out_cfg = z.read(reload3mf.MODEL_SETTINGS).decode()
+            layer = z.read("Metadata/layer_heights_profile.txt").decode()
+            ranges = z.read("Metadata/layer_config_ranges.xml").decode()
+            brim = z.read("Metadata/brim_ear_points.txt").decode()
+            gcode = z.read("Metadata/custom_gcode_per_layer.xml").decode()
+        self.assertIn('transform="1 0 0 0 1 0 0 0 1 5 5 5"', out_root)
+        self.assertEqual(out_root.count('<component '), 4)  # 3 main + 1 extra
+        self.assertIn('subtype="modifier_part"', out_cfg)
+        self.assertIn('wall_loops" value="9"', out_cfg)
+        self.assertEqual(out_cfg.count('<part '), 4)
+        self.assertIn("id=3|0.1;0.1;0.1;0.1;0.1;0.1", layer)
+        self.assertIn('<object id="3"', ranges)
+        self.assertIn("object_id=1|1 2 3 0.5 4 5 6 0.5", brim)
+        self.assertIn('<plate_info id="1"', gcode)
 
     def test_common_folder(self):
         self.assertEqual(build3mf.common_folder(["GripV/parts/a.stl", "GripV/parts/x/b.stl"]), "GripV/parts")

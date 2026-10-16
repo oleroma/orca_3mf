@@ -29,6 +29,10 @@ class OrcaPart(bpy.types.PropertyGroup):
         description="Turn around the up axis once the part stands on the plate")
     copies: bpy.props.IntProperty(name="Copies", default=1, min=1, soft_max=20,
                                   description="How many of this part go on the plate")
+    mirror: bpy.props.BoolProperty(
+        name="Mirror", default=False,
+        description="Mirror the part across its own X axis before standing it up: a part mirrored in Orca "
+                    "imports as its original shape with this ticked, and builds back mirrored")
     seam: bpy.props.PointerProperty(
         name="Seam", type=bpy.types.Object, poll=_seam_poll,
         description="Curve or mesh that marks this part's seam: a curve's splines, the edges of a mesh made of edges "

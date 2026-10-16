@@ -187,7 +187,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
                       "files and how they stand on the plate. Build then updates that file")
     bl_options = {'UNDO'}
     filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
-    filter_glob: bpy.props.StringProperty(default="*.3mf", options={'HIDDEN'})
+    filter_glob: bpy.props.StringProperty(default="*.3mf;*.3MF", options={'HIDDEN'})
 
     def invoke(self, context, event):
         root = props.project_root(context.scene)
@@ -209,7 +209,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
 
         project = settings.projects.add()
         settings.project_index = len(settings.projects) - 1
-        project.name = os.path.splitext(os.path.basename(path))[0]
+        project.name = os.path.basename(path)
         root = props.project_root(scene)
         project.folder = props.relative_to(os.path.dirname(path), root)
         if project.folder == ".":
@@ -235,6 +235,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
                 part.up = p.up
                 part.angle = p.angle
                 part.copies = p.copies
+                part.mirror = p.mirror
                 if p.stl and p.note:
                     lines.append("  %s: %s" % (p.name, p.note))
         lines += ["  problem: %s" % p for p in problems]
@@ -263,26 +264,27 @@ def project_spec(context, project, painted):
                 continue
             seam = None
             if part.seam is not None:
-                key = part.seam.name
-                if key not in lines:
-                    lines[key] = blender_seams.seam_line(part.seam, context)
-                line, problem = lines[key]
+                who = part.seam.as_pointer()
+                if who not in lines:
+                    lines[who] = blender_seams.seam_line(part.seam, context)
+                line, problem = lines[who]
                 if problem:
-                    problems.append("plate %d, %s: seam %s %s" % (plate_no + 1, part.label(), key, problem))
+                    problems.append("plate %d, %s: seam %s %s" % (plate_no + 1, part.label(), part.seam.name,
+                                                                  problem))
                 else:
-                    seam = _seam_function(line, settings, painted)
+                    seam = _seam_function(line, settings, painted, who)
             parts.append(build3mf.PartSpec(part.label(), props.part_path(scene, project, plate, part), part.up,
-                                           part.angle, part.copies, seam))
+                                           part.angle, part.copies, seam, mirror=part.mirror))
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
     template = os.path.normpath(bpy.path.abspath(project.template)) if project.template else ""
     return build3mf.ProjectSpec(props.project_path(scene, project), plates, template), problems
 
 
-def _seam_function(line, settings, painted):
+def _seam_function(line, settings, painted, who):
     painter = seams.SeamPainter([line], width=settings.seam_width, snap=settings.snap_distance, min_share=0.0)
 
     def paint(path, mesh):
-        key = (os.path.normcase(path), line.name, settings.seam_width, settings.snap_distance)
+        key = (os.path.normcase(path), who, line.name, settings.seam_width, settings.snap_distance)
         if key not in painted:
             result = painter.paint(mesh.verts, mesh.tris, label=path)
             painted[key] = (({}, "seam line %s is not on this part (further than the snap distance)" % line.name)
@@ -330,7 +332,17 @@ class ORCA_OT_build(bpy.types.Operator):
             return {'CANCELLED'}
         stl_cache, painted = {}, {}
         lines, written = [], 0
+        by_path = {}
         for project in projects:
+            key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
+            by_path.setdefault(key, []).append(project)
+        for project in projects:
+            key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
+            if len(by_path[key]) > 1:
+                others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
+                lines += ["%s" % props.project_path(context.scene, project),
+                          "  problem: same 3MF file as %s" % others, "  not written", ""]
+                continue
             spec, problems = project_spec(context, project, painted)
             if problems:
                 lines += ["%s" % spec.path] + ["  problem: %s" % p for p in problems] + ["  not written", ""]

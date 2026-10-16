@@ -312,6 +312,25 @@ def compose(outer, inner):
     return rows, t
 
 
+def _inverse3(m):
+    a, b, c = m[0]
+    d, e, f = m[1]
+    g, h, i = m[2]
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    if abs(det) < 1e-12:
+        raise ReloadError("singular transform")
+    return (((e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det),
+            ((f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det),
+            ((d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det))
+
+
+def invert(transform):
+    """Inverse of a (rows, translation) transform."""
+    rows, t = transform
+    inv = _inverse3(rows)
+    return inv, tuple(-sum(inv[r][k] * t[k] for k in range(3)) for r in range(3))
+
+
 def min_z(mesh, transform):
     (rows, t) = transform
     a, b, c = rows[2]
@@ -709,6 +728,7 @@ def write_project(project, out_path, replace=False):
                 copy.create_system = info.create_system
                 out.writestr(copy, data)
         _check_output(tmp, project)
+        os.chmod(tmp, 0o644)
         if same:
             project.close()  # Windows cannot replace a file that is still open
         os.replace(tmp, out_path)

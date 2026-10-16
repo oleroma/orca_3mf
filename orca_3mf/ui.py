@@ -309,6 +309,8 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         row = draw_label_row(box, "Turn:")
         row.prop(part, "angle", text="")
         row.prop(part, "copies")
+        row = draw_label_row(box, "Mirror:")
+        row.prop(part, "mirror", text="")
         row = draw_label_row(box, "Seam:")
         row.prop(part, "seam", text="")
 

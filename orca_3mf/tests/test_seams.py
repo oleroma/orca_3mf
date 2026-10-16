@@ -1,6 +1,6 @@
 """Tests for seams.py (seam lines to Orca seam painting). Plain Python, no Blender:
 
-    python -I extensions/orca_reload/tests/test_seams.py
+    python -I orca_3mf/tests/test_seams.py
 """
 import math
 import os

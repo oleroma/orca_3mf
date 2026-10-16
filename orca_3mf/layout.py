@@ -30,6 +30,13 @@ def apply(m, v):
     return tuple(m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2] for r in range(3))
 
 
+def det(m):
+    """Determinant of a 3x3 row list. Negative: a reflection (mirror) is baked in."""
+    return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+
+
 def rot_z(angle):
     c, s = math.cos(angle), math.sin(angle)
     return ((c, -s, 0.0), (s, c, 0.0), (0.0, 0.0, 1.0))
