@@ -1,4 +1,4 @@
-# Orca tab handoff (2026-10-16)
+# Orca 3mf
 
 ## What it does
 - Projects (3MF files) > plates > parts, saved in the .blend, laid out like Combi Export.
