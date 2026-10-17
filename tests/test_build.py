@@ -1,6 +1,6 @@
 """Tests for layout.py and build3mf.py (placing parts and writing Orca projects). Plain Python, no Blender:
 
-    python -I orca_3mf/tests/test_build.py
+    python -I tests/test_build.py
 """
 import json
 import math
@@ -14,7 +14,7 @@ import zipfile
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXT_DIR = os.path.dirname(HERE)
+EXT_DIR = os.path.join(os.path.dirname(HERE), "orca_3mf")
 sys.path.insert(0, EXT_DIR)
 sys.path.insert(0, HERE)
 

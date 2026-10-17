@@ -1,6 +1,6 @@
 """Tests for seams.py (seam lines to Orca seam painting). Plain Python, no Blender:
 
-    python -I orca_3mf/tests/test_seams.py
+    python -I tests/test_seams.py
 """
 import math
 import os
@@ -9,7 +9,7 @@ import sys
 import unittest
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "orca_3mf"))
 
 import seams  # noqa: E402
 from seams import ENFORCER, NONE, SeamLine, SeamPainter  # noqa: E402

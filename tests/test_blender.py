@@ -1,7 +1,7 @@
 """Tests for the Orca tab in Blender. Run under Blender itself, since the bpy module is only available inside
 Blender (Blender 5.2 or newer):
 
-    blender -b -P orca_3mf/tests/test_blender.py
+    blender -b -P tests/test_blender.py
 
 Grip.blend is not opened. Each test builds a box part and writes its STL like Combi Export does (world space), sets
 up a project with the tab's operators and properties, and presses Build or Import.
@@ -17,8 +17,8 @@ import unittest
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXT_DIR = os.path.dirname(HERE)
-ROOT = os.path.dirname(EXT_DIR)
+EXT_DIR = os.path.join(os.path.dirname(HERE), "orca_3mf")
+ROOT = os.path.dirname(HERE)
 
 # Keep Blender's user folders out of the real ones, and no __pycache__ in the repository
 _USER = tempfile.mkdtemp(prefix="orca_reload_test_")
