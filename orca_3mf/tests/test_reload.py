@@ -1,4 +1,6 @@
-"""Tests for orca_reload.py. Run: python -m unittest discover tools/orca_reload
+"""Tests for reload3mf.py (the command line reload). Plain Python, no Blender:
+
+    python -I orca_3mf/tests/test_reload.py
 
 The projects are generated here with the same layout OrcaSlicer 2.x writes
 (3D/3dmodel.model with components, one 3D/Objects/*.model per part,
@@ -13,11 +15,15 @@ import shutil
 import struct
 import tempfile
 import unittest
+import sys
 import zipfile
 from contextlib import redirect_stdout, redirect_stderr
 
-import orca_reload
-import seams  # the extension's seam painter, on the path through orca_reload
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import reload3mf as orca_reload  # noqa: E402
+import seams  # noqa: E402
 
 HEADER = ('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" '
           'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '

@@ -34,7 +34,7 @@
 ```
 python -I orca_3mf/tests/test_build.py        # 22 OK
 python -I orca_3mf/tests/test_seams.py        # 8 OK
-python -m unittest discover tools/orca_reload # 17 OK
+python -I orca_3mf/tests/test_reload.py  # 17 OK
 blender -b -P orca_3mf/tests/test_blender.py  # 10 OK (Blender 5.2)
 ```
 
