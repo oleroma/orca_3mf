@@ -32,10 +32,10 @@
 ## Verification
 
 ```
-python -I orca_3mf/tests/test_build.py        # 22 OK
-python -I orca_3mf/tests/test_seams.py        # 8 OK
-python -I orca_3mf/tests/test_reload.py  # 17 OK
-blender -b -P orca_3mf/tests/test_blender.py  # 10 OK (Blender 5.2)
+python -I tests/test_build.py        # 22 OK
+python -I tests/test_seams.py        # 8 OK
+python -I tests/test_reload.py  # 17 OK
+blender -b -P tests/test_blender.py  # 10 OK (Blender 5.2)
 ```
 
 Also smoke-tested against `GripV_parts.3mf` (import -> rebuild round-trips 31 parts / 9 plates and their settings) and the dongle project (R2/R4 mirror detection). The extra-volume and index-remap paths are validated with a synthetic `modifier_part` fixture built to Orca's format; none of the local `.3mf` files contain a non-`normal_part` volume.

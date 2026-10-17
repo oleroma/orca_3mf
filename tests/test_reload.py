@@ -1,6 +1,6 @@
 """Tests for reload3mf.py (the command line reload). Plain Python, no Blender:
 
-    python -I orca_3mf/tests/test_reload.py
+    python -I tests/test_reload.py
 
 The projects are generated here with the same layout OrcaSlicer 2.x writes
 (3D/3dmodel.model with components, one 3D/Objects/*.model per part,
@@ -20,7 +20,7 @@ import zipfile
 from contextlib import redirect_stdout, redirect_stderr
 
 sys.dont_write_bytecode = True
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "orca_3mf"))
 
 import reload3mf as orca_reload  # noqa: E402
 import seams  # noqa: E402
