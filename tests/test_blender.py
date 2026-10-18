@@ -216,6 +216,35 @@ class OrcaTabTest(unittest.TestCase):
         self.assertIn("seam line Stray is not on this part", report)
         self.assertTrue(os.path.exists(self.out()))
 
+    def test_nurbs_seam_follows_the_smooth_curve(self):
+        from bl_ext.orca_test.orca_3mf import blender_seams
+        cu = bpy.data.curves.new("SeamNurbs", 'CURVE')
+        cu.dimensions = '3D'
+        cu.bevel_depth = 0.5  # ignored: the seam is the bare line
+        spline = cu.splines.new('NURBS')
+        spline.points.add(3)
+        for sp, p in zip(spline.points, [(0, 0, 0), (1, 2, 0), (3, 2, 0), (4, 0, 0)]):
+            sp.co = (*p, 1.0)
+        spline.order_u, spline.resolution_u, spline.use_endpoint_u = 4, 6, True
+        obj = bpy.data.objects.new("SeamNurbs", cu)
+        obj.location = (10, 0, 0)
+        bpy.context.scene.collection.objects.link(obj)
+        bpy.context.view_layer.update()
+        curves, objects = len(bpy.data.curves), len(bpy.data.objects)
+        line = blender_seams.curve_polylines(obj)[0]
+        self.assertEqual((len(bpy.data.curves), len(bpy.data.objects)), (curves, objects))
+        self.assertGreater(len(line), 4)
+        self.assertEqual(tuple(round(c, 4) for c in line[0]), (10, 0, 0))
+        self.assertEqual(tuple(round(c, 4) for c in line[-1]), (14, 0, 0))
+        # The smooth curve stays inside the control polygon: it never reaches the control points' y = 2
+        self.assertLess(max(p.y for p in line), 1.9)
+        self.assertGreater(max(p.y for p in line), 1.0)
+        # A closed spline comes back closed
+        spline.use_cyclic_u = True
+        line = blender_seams.curve_polylines(obj)[0]
+        self.assertEqual(tuple(line[0]), tuple(line[-1]))
+        self.assertEqual(len(line), len(set(tuple(round(c, 6) for c in p) for p in line)) + 1)
+
     def test_definition_is_saved_in_the_blend_file(self):
         project = self.add_project(plates=2)
         project.plates[1].gap = 8.5

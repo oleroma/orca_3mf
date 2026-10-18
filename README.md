@@ -1,4 +1,4 @@
-# Orca Reload
+# Orca 3MF
 
 An **Orca** tab in the 3D Viewport sidebar that builds OrcaSlicer projects (`.3mf`) from the STLs Combi Export writes. You set up each project once in Blender: its plates, the parts on each plate, how each part stands on the plate, and the seam drawn on it. **Build** then writes the project, so a new export is one click away from a ready Orca project, seams included.
 
@@ -80,7 +80,6 @@ Orca stores each part's mesh centred on itself, and the part's place and rotatio
 - Keeping parts where they were placed by hand in Orca: Build always nests.
 - Nesting by outline: parts are nested by their bounding box, so L-shaped parts leave space unused.
 - Curves made by Geometry Nodes: a curve object's modifiers are ignored. A mesh object with Geometry Nodes works when its nodes output mesh edges (add Curve to Mesh).
-- NURBS curves follow their control points, not the smooth curve.
 - Scale set in Orca is dropped on Import.
 - Bed exclude areas are only warned about, not honoured when nesting; round and non-rectangular beds nest on their bounding box.
 
