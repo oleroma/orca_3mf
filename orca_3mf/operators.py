@@ -276,7 +276,7 @@ def project_spec(context, project, painted):
             parts.append(build3mf.PartSpec(part.label(), props.part_path(scene, project, plate, part), part.up,
                                            part.angle, part.copies, seam, mirror=part.mirror))
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
-    template = os.path.normpath(bpy.path.abspath(project.template)) if project.template else ""
+    template = props.absolute(project.template)
     return build3mf.ProjectSpec(props.project_path(scene, project), plates, template), problems
 
 

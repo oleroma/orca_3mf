@@ -14,6 +14,8 @@ The setup is saved in the .blend file. The tab is laid out like Combi Export: th
 | Plates | One row per Orca plate: tick, number, name, **gap** and STL folder. |
 | Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Copies**, **Mirror** and **Seam**. |
 
+The roots can be absolute (`D:\Grip\stl`, `/home/olex/Grip/stl`) or relative to the .blend file's folder: `../stl` and Blender's `//../stl` are the same folder. Folders can be written with `/` or `\` on Windows and Linux alike, so a .blend set up on one works on the other.
+
 A part's STL is found at STL root / project's STL folder / plate's STL folder / the part's path, with `/` between folders. So a project whose STL folder is `GripV/parts` and a plate whose STL folder is `buttons/default` take `cap_default/circle.stl` from `GripV/parts/buttons/default/cap_default/circle.stl`.
 
 The **+** of the Parts list opens a file browser: pick one or more STLs, each becomes a part (Shift + **+** adds an empty one). The folder button next to a part's path picks another file.
@@ -69,7 +71,8 @@ Each part's place on the plate is set again by the nesting. Objects made of seve
 | `reload3mf.py` | Reads Orca projects and reloads STLs into them. Also runs on its own from the command line, see below. No Blender needed. |
 | `seams.py` | Seam lines to Orca's seam painting: each triangle near the line is split until the painted strip follows it. No Blender needed. |
 | `blender_seams.py` | Reads a seam line from a curve or mesh. |
-| `props.py` | What the .blend saves, and how the paths are joined. |
+| `paths.py` | Roots and folders to absolute paths, with Windows or Linux separators. No Blender needed. |
+| `props.py` | What the .blend saves. |
 | `operators.py`, `ui.py` | The tab's buttons and panels. |
 
 Orca stores each part's mesh centred on itself, and the part's place and rotation on the build item; plates sit side by side, 1.2 bed widths apart, √(number of plates), rounded up, to a row, rows going towards −Y, and each part belongs to the plate it lies on.
@@ -101,6 +104,7 @@ python -I tests/test_build.py
 python -I tests/test_seams.py
 blender -b -P tests/test_blender.py
 python -I tests/test_reload.py
+python -I tests/test_paths.py
 ```
 
 `test_blender.py` needs a Python with the `bpy` module (Blender 5.2 or newer); the others need only Python. None of them open Grip.blend.

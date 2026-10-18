@@ -34,8 +34,9 @@
 ```
 python -I tests/test_build.py        # 22 OK
 python -I tests/test_seams.py        # 8 OK
-python -I tests/test_reload.py  # 17 OK
-blender -b -P tests/test_blender.py  # 11 OK (Blender 5.2; the pip bpy 5.2.2 module also works)
+python -I tests/test_reload.py       # 17 OK
+python -I tests/test_paths.py        # 14 OK
+blender -b -P tests/test_blender.py  # 12 OK (Blender 5.2; the pip bpy 5.2.2 module also works)
 ```
 
 Also smoke-tested against `GripV_parts.3mf` (import -> rebuild round-trips 31 parts / 9 plates and their settings) and the dongle project (R2/R4 mirror detection). The extra-volume and index-remap paths are validated with a synthetic `modifier_part` fixture built to Orca's format; none of the local `.3mf` files contain a non-`normal_part` volume.
@@ -44,7 +45,9 @@ Also smoke-tested against `GripV_parts.3mf` (import -> rebuild round-trips 31 pa
 
 - **NURBS seams** — a NURBS seam now follows the smooth curve: each NURBS spline is copied alone into a temporary curve and evaluated by Blender (`blender_seams.py: nurbs_points`). Test: `test_nurbs_seam_follows_the_smooth_curve`.
 
+- **Relative roots** — STL root, 3MF root and Settings from may be relative (`../stl`), starting at the .blend file's folder like `//../stl`; `/` and `\` both work on Windows and Linux. The three path properties declare `PATH_SUPPORTS_BLEND_RELATIVE` (Blender 5.2 warns on `//` otherwise). Files: `paths.py` (new, no Blender), `props.py`, `operators.py`. Tests: `tests/test_paths.py` (runs with Linux and Windows path rules), `test_relative_roots_start_at_the_blend_file`.
+
 ## Still to do
 
-- **UNC paths** — `\server\share\...` collides with Blender's blend-relative `//...` prefix in `props.py`; needs a real share to verify, or a documented decision on which wins.
+- **UNC paths** — parked by Olex (2026-10-18). `\\server\share\...` written with backslashes is now kept as a network path on Windows (tested with Windows path rules only); `//server/share` with forward slashes is Blender's blend-relative prefix and wins. Not tried on a real share.
 

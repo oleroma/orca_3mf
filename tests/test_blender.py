@@ -296,6 +296,25 @@ class OrcaTabTest(unittest.TestCase):
         self.add_part()
         self.assertIn("(new)", self.build())
 
+    def test_relative_roots_start_at_the_blend_file(self):
+        from bl_ext.orca_test.orca_3mf import props
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        scene = bpy.context.scene
+        scene.orca_reload.stl_root = "../stl"
+        scene.orca_reload.project_root = "..\\orca\\"  # typed on Windows
+        self.assertEqual(props.stl_root(scene), os.path.join(self.dir, "stl"))
+        self.assertEqual(props.project_root(scene), os.path.join(self.dir, "orca"))
+        project = self.add_project()
+        project.template = "../printer.3mf"
+        part = self.add_part()
+        self.assertEqual(props.part_path(scene, project, project.plates[0], part), self.stl)
+        self.assertIn("(new)", self.build())
+        self.assertTrue(os.path.isfile(self.out()))
+        scene.orca_reload.project_root = "//../orca"
+        self.assertIn("(rebuilt)", self.build())
+
     def test_copy_paste_and_move(self):
         project = self.add_project()
         self.add_part(copies=4)
