@@ -216,6 +216,35 @@ class OrcaTabTest(unittest.TestCase):
         self.assertIn("seam line Stray is not on this part", report)
         self.assertTrue(os.path.exists(self.out()))
 
+    def test_nurbs_seam_follows_the_smooth_curve(self):
+        from bl_ext.orca_test.orca_3mf import blender_seams
+        cu = bpy.data.curves.new("SeamNurbs", 'CURVE')
+        cu.dimensions = '3D'
+        cu.bevel_depth = 0.5  # ignored: the seam is the bare line
+        spline = cu.splines.new('NURBS')
+        spline.points.add(3)
+        for sp, p in zip(spline.points, [(0, 0, 0), (1, 2, 0), (3, 2, 0), (4, 0, 0)]):
+            sp.co = (*p, 1.0)
+        spline.order_u, spline.resolution_u, spline.use_endpoint_u = 4, 6, True
+        obj = bpy.data.objects.new("SeamNurbs", cu)
+        obj.location = (10, 0, 0)
+        bpy.context.scene.collection.objects.link(obj)
+        bpy.context.view_layer.update()
+        curves, objects = len(bpy.data.curves), len(bpy.data.objects)
+        line = blender_seams.curve_polylines(obj)[0]
+        self.assertEqual((len(bpy.data.curves), len(bpy.data.objects)), (curves, objects))
+        self.assertGreater(len(line), 4)
+        self.assertEqual(tuple(round(c, 4) for c in line[0]), (10, 0, 0))
+        self.assertEqual(tuple(round(c, 4) for c in line[-1]), (14, 0, 0))
+        # The smooth curve stays inside the control polygon: it never reaches the control points' y = 2
+        self.assertLess(max(p.y for p in line), 1.9)
+        self.assertGreater(max(p.y for p in line), 1.0)
+        # A closed spline comes back closed
+        spline.use_cyclic_u = True
+        line = blender_seams.curve_polylines(obj)[0]
+        self.assertEqual(tuple(line[0]), tuple(line[-1]))
+        self.assertEqual(len(line), len(set(tuple(round(c, 6) for c in p) for p in line)) + 1)
+
     def test_definition_is_saved_in_the_blend_file(self):
         project = self.add_project(plates=2)
         project.plates[1].gap = 8.5
@@ -224,6 +253,7 @@ class OrcaTabTest(unittest.TestCase):
         bpy.context.scene.orca_reload.seam_width = 0.8
         path = os.path.join(self.dir, "saved.blend")
         bpy.ops.wm.save_as_mainfile(filepath=path)
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
         bpy.ops.wm.open_mainfile(filepath=path)
         settings = bpy.context.scene.orca_reload
         project = settings.projects[0]
@@ -266,6 +296,63 @@ class OrcaTabTest(unittest.TestCase):
         self.add_project()
         self.add_part()
         self.assertIn("(new)", self.build())
+
+    def test_relative_roots_start_at_the_blend_file(self):
+        from bl_ext.orca_test.orca_3mf import props
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        scene = bpy.context.scene
+        scene.orca_reload.stl_root = "../stl"
+        scene.orca_reload.project_root = "..\\orca\\"  # typed on Windows
+        self.assertEqual(props.stl_root(scene), os.path.join(self.dir, "stl"))
+        self.assertEqual(props.project_root(scene), os.path.join(self.dir, "orca"))
+        project = self.add_project()
+        project.template = "../printer.3mf"
+        part = self.add_part()
+        self.assertEqual(props.part_path(scene, project, project.plates[0], part), self.stl)
+        self.assertIn("(new)", self.build())
+        self.assertTrue(os.path.isfile(self.out()))
+        scene.orca_reload.project_root = "//../orca"
+        self.assertIn("(rebuilt)", self.build())
+
+    def test_folder_buttons_save_relative_paths(self):
+        scene = bpy.context.scene
+        settings = scene.orca_reload
+        project = self.add_project()
+        part = self.add_part()
+        other = os.path.join(self.dir, "stl", "shared", "box.stl")
+        fixtures.write_stl(other, fixtures.box((10, 10, 10)))
+        outside = os.path.join(self.dir, "elsewhere", "box.stl")
+        fixtures.write_stl(outside, fixtures.box((10, 10, 10)))
+        # Not saved yet: the picked folders stay absolute
+        self.assertEqual(bpy.ops.orca_reload.browse_root(root='STL_ROOT', directory=os.path.join(self.dir, "stl") +
+                                                         os.sep), {'FINISHED'})
+        self.assertEqual(settings.stl_root, os.path.join(self.dir, "stl"))
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        settings, project = scene.orca_reload, scene.orca_reload.projects[0]
+        part = project.plates[0].parts[0]
+        for root, prop, folder, saved in (('STL_ROOT', "stl_root", "stl", "../stl"),
+                                          ('PROJECT_ROOT', "project_root", "orca", "../orca"),
+                                          ('STL_ROOT', "stl_root", "blender", "."),
+                                          ('STL_ROOT', "stl_root", os.path.join("stl", "GripV"), "../stl/GripV")):
+            self.assertEqual(bpy.ops.orca_reload.browse_root(root=root, directory=os.path.join(self.dir, folder) +
+                                                             os.sep), {'FINISHED'})
+            self.assertEqual(getattr(settings, prop), saved)
+        settings.stl_root = "../stl"
+        self.assertEqual(bpy.ops.orca_reload.browse_template(filepath=self.template), {'FINISHED'})
+        self.assertEqual(project.template, "../printer.3mf")
+        # A part's STL is saved from its plate's folder, with ../ when it is outside it
+        self.assertEqual(bpy.ops.orca_reload.browse_part(filepath=other), {'FINISHED'})
+        self.assertEqual(part.path, "../shared/box.stl")
+        self.assertEqual(bpy.ops.orca_reload.browse_part(filepath=outside), {'FINISHED'})
+        self.assertEqual(part.path, "../../elsewhere/box.stl")
+        self.assertEqual(bpy.ops.orca_reload.browse_part(filepath=self.stl), {'FINISHED'})
+        self.assertEqual(part.path, "parts/box.stl")
+        self.assertIn("(new)", self.build())
+        self.assertTrue(os.path.isfile(self.out()))
 
     def test_copy_paste_and_move(self):
         project = self.add_project()
@@ -342,7 +429,8 @@ class OrcaTabTest(unittest.TestCase):
         for name in ("VIEW3D_PT_orca_reload", "VIEW3D_PT_orca_reload_info", "VIEW3D_PT_orca_reload_projects",
                      "VIEW3D_PT_orca_reload_plates", "VIEW3D_PT_orca_reload_parts"):
             self.assertTrue(hasattr(bpy.types, name), name)
-        for op in ("list_action", "add_parts", "browse_part", "import_project", "build", "clear_log"):
+        for op in ("list_action", "add_parts", "browse_part", "browse_root", "browse_template", "import_project",
+                   "build", "clear_log"):
             self.assertTrue(hasattr(bpy.ops.orca_reload, op), op)
 
 
