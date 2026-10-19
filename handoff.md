@@ -35,8 +35,8 @@
 python -I tests/test_build.py        # 22 OK
 python -I tests/test_seams.py        # 8 OK
 python -I tests/test_reload.py       # 17 OK
-python -I tests/test_paths.py        # 14 OK
-blender -b -P tests/test_blender.py  # 12 OK (Blender 5.2; the pip bpy 5.2.2 module also works)
+python -I tests/test_paths.py        # 17 OK
+blender -b -P tests/test_blender.py  # 13 OK (Blender 5.2; the pip bpy 5.2.2 module also works)
 ```
 
 Also smoke-tested against `GripV_parts.3mf` (import -> rebuild round-trips 31 parts / 9 plates and their settings) and the dongle project (R2/R4 mirror detection). The extra-volume and index-remap paths are validated with a synthetic `modifier_part` fixture built to Orca's format; none of the local `.3mf` files contain a non-`normal_part` volume.
@@ -45,7 +45,7 @@ Also smoke-tested against `GripV_parts.3mf` (import -> rebuild round-trips 31 pa
 
 - **NURBS seams** — a NURBS seam now follows the smooth curve: each NURBS spline is copied alone into a temporary curve and evaluated by Blender (`blender_seams.py: nurbs_points`). Test: `test_nurbs_seam_follows_the_smooth_curve`.
 
-- **Relative roots** — STL root, 3MF root and Settings from may be relative (`../stl`), starting at the .blend file's folder like `//../stl`; `/` and `\` both work on Windows and Linux. The three path properties declare `PATH_SUPPORTS_BLEND_RELATIVE` (Blender 5.2 warns on `//` otherwise). Files: `paths.py` (new, no Blender), `props.py`, `operators.py`. Tests: `tests/test_paths.py` (runs with Linux and Windows path rules), `test_relative_roots_start_at_the_blend_file`.
+- **Relative roots** — STL root, 3MF root and Settings from may be relative (`../stl`), starting at the .blend file's folder like `//../stl`; `/` and `\` both work on Windows and Linux. The folder buttons next to these fields are the add-on's own (`browse_root`, `browse_template`; the properties are plain strings, so Blender's own button and its `//..\` format are gone) and save the pick as `../stl` from the .blend folder (absolute while unsaved or on another drive, `paths.relative_form`). Picked part STLs are saved from the plate folder, `../` when outside it. Default 3MF root is `../orca_slicer`. Files: `paths.py` (new, no Blender), `props.py`, `operators.py`. Tests: `tests/test_paths.py` (runs with Linux and Windows path rules), `test_relative_roots_start_at_the_blend_file`.
 
 ## Still to do
 

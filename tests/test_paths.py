@@ -75,6 +75,17 @@ class LinuxPaths(unittest.TestCase):
         self.assertEqual(paths.relative_to(self.p("stl"), self.p("stl", "GripV")), self.p("stl"))
 
 
+    def test_relative_form(self):
+        self.assertEqual(paths.relative_form(self.p("stl"), self.blend_dir), "../stl")
+        self.assertEqual(paths.relative_form(self.p("dir", "other_dir"), self.blend_dir), "../dir/other_dir")
+        self.assertEqual(paths.relative_form(self.p("blender"), self.blend_dir), ".")
+        self.assertEqual(paths.relative_form(self.p("blender", "stl", "box.stl"), self.blend_dir), "stl/box.stl")
+        self.assertEqual(paths.relative_form(self.p("stl"), ""), self.p("stl"))  # the .blend is not saved
+        # What is saved resolves back to the same folder
+        for folder in (self.p("stl"), self.p("blender"), self.ospath.normpath(self.other)):
+            self.assertEqual(paths.absolute(paths.relative_form(folder, self.blend_dir), self.blend_dir), folder)
+
+
 class WindowsPaths(LinuxPaths):
     ospath = ntpath
     blend_dir = "D:\\Grip\\blender"
@@ -87,6 +98,11 @@ class WindowsPaths(LinuxPaths):
         self.assertEqual(paths.absolute("/stl", self.blend_dir), "D:\\stl")
         self.assertEqual(paths.join(self.p("stl"), "\\GripV", "parts"), "D:\\GripV\\parts")
         self.assertEqual(paths.relative_to("E:\\data\\box.stl", self.p("stl")), "E:\\data\\box.stl")
+
+    def test_relative_form_on_another_drive(self):
+        self.assertEqual(paths.relative_form("E:\\data\\stl", self.blend_dir), "E:\\data\\stl")
+        self.assertEqual(paths.relative_form("\\\\server\\share\\stl", self.blend_dir), "\\\\server\\share\\stl")
+        self.assertEqual(paths.relative_form("d:\\grip\\STL", self.blend_dir), "../STL")
 
     def test_network_share_is_kept(self):
         self.assertEqual(paths.absolute("\\\\server\\share\\stl", self.blend_dir), "\\\\server\\share\\stl")

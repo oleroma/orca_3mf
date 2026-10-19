@@ -8,17 +8,17 @@ The setup is saved in the .blend file. The tab is laid out like Combi Export: th
 
 | Panel | What it holds |
 | --- | --- |
-| Orca Projects | **STL root**: where the parts' paths start. Empty: Combi Export's root. **3MF root**: where the projects are saved, `//../orca_slicer/` by default. Next to it, **Import** (make a project from an Orca file) and **Build** (every ticked project). **Seams**: the width of the painted seam strip and how far a seam line may be from the surface. |
+| Orca Projects | **STL root**: where the parts' paths start. Empty: Combi Export's root. **3MF root**: where the projects are saved, `../orca_slicer` by default. Next to it, **Import** (make a project from an Orca file) and **Build** (every ticked project). **Seams**: the width of the painted seam strip and how far a seam line may be from the surface. |
 | Info | The log of the last build or import, and a short guide. |
 | Projects | One row per 3MF file: its Build button, tick, name and folder. Below the list, the active project's STL folder and **Settings from**. |
 | Plates | One row per Orca plate: tick, number, name, **gap** and STL folder. |
 | Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Copies**, **Mirror** and **Seam**. |
 
-The roots can be absolute (`D:\Grip\stl`, `/home/olex/Grip/stl`) or relative to the .blend file's folder: `../stl` and Blender's `//../stl` are the same folder. Folders can be written with `/` or `\` on Windows and Linux alike, so a .blend set up on one works on the other.
+The roots can be absolute (`D:\Grip\stl`, `/home/olex/Grip/stl`) or relative to the .blend file's folder: `../stl` and Blender's `//../stl` are the same folder. Folders can be written with `/` or `\` on Windows and Linux alike, so a .blend set up on one works on the other. The folder button next to STL root, 3MF root and **Settings from** saves the picked folder or file in that relative form (`../stl`); it stays absolute while the .blend is not saved, or when it is on another drive.
 
 A part's STL is found at STL root / project's STL folder / plate's STL folder / the part's path, with `/` between folders. So a project whose STL folder is `GripV/parts` and a plate whose STL folder is `buttons/default` take `cap_default/circle.stl` from `GripV/parts/buttons/default/cap_default/circle.stl`.
 
-The **+** of the Parts list opens a file browser: pick one or more STLs, each becomes a part (Shift + **+** adds an empty one). The folder button next to a part's path picks another file.
+The **+** of the Parts list opens a file browser: pick one or more STLs, each becomes a part (Shift + **+** adds an empty one). The folder button next to a part's path picks another file. Picked STLs are saved from the plate's STL folder, with `../` when they are outside it.
 
 ## Placing the parts
 

@@ -66,9 +66,10 @@ class OrcaProject(bpy.types.PropertyGroup):
     stl_folder: bpy.props.StringProperty(
         name="STL folder", description="Folder of this project's parts, below the STL root. Use / between folders")
     template: bpy.props.StringProperty(
-        name="Settings from", subtype='FILE_PATH', options={'PATH_SUPPORTS_BLEND_RELATIVE'},
+        name="Settings from",
         description="An Orca project (.3mf) whose printer, process and filament settings a new project starts "
-                    "with; the bed size comes from it too. Once the project exists, its own settings are kept")
+                    "with; the bed size comes from it too. Once the project exists, its own settings are kept. "
+                    "A relative path (../printer.3mf) starts at the .blend file's folder")
     plates: bpy.props.CollectionProperty(type=OrcaPlate)
     plate_index: bpy.props.IntProperty()
 
@@ -80,11 +81,11 @@ class OrcaLogLine(bpy.types.PropertyGroup):
 
 class OrcaSettings(bpy.types.PropertyGroup):
     stl_root: bpy.props.StringProperty(
-        name="STL root", subtype='DIR_PATH', options={'PATH_SUPPORTS_BLEND_RELATIVE'},
+        name="STL root",
         description="Folder the parts' STL paths start from. Empty: Combi Export's root. A relative path "
                     "(../stl) starts at the .blend file's folder")
     project_root: bpy.props.StringProperty(
-        name="3MF root", subtype='DIR_PATH', default="//../orca_slicer/", options={'PATH_SUPPORTS_BLEND_RELATIVE'},
+        name="3MF root", default="../orca_slicer",
         description="Folder the projects' 3MF files are saved in. Empty: the .blend file's folder. A relative "
                     "path (../orca_slicer) starts at the .blend file's folder")
     projects: bpy.props.CollectionProperty(type=OrcaProject)
@@ -122,6 +123,12 @@ def active_part(plate):
 def absolute(path):
     """A saved root or file as an absolute path: // and a relative path (../stl) start at the .blend file's folder."""
     return paths.absolute(path, os.path.dirname(bpy.data.filepath))
+
+
+def blend_relative(path):
+    """A picked folder or file as it is saved: from the .blend file's folder (../stl), or absolute while the .blend
+    is not saved or the path is on another drive."""
+    return paths.relative_form(path, os.path.dirname(bpy.data.filepath))
 
 
 def stl_root(scene):

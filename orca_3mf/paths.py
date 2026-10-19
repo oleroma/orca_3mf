@@ -43,3 +43,15 @@ def relative_to(path, base):
     except ValueError:  # another drive
         return path
     return path if rel == ".." or rel.startswith(".." + ospath.sep) else rel.replace("\\", "/")
+
+
+def relative_form(path, base):
+    """`path` written from `base` with / between folders (../stl/GripV), as a picked folder or file is saved; the
+    absolute path when there is no way there from `base` (no base, or another drive)."""
+    if not base:
+        return path
+    try:
+        rel = ospath.relpath(path, base)
+    except ValueError:  # another drive
+        return path
+    return rel.replace("\\", "/")
