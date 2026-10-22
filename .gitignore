@@ -1,2 +1,5 @@
 __pycache__/
 .delta/
+
+# Everything made by building, testing or running the program
+/build/
