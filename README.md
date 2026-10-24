@@ -118,3 +118,5 @@ python -I tests/test_paths.py
 ```
 
 `test_blender.py` needs a Python with the `bpy` module (Blender 5.2 or newer); the others need only Python. None of them open Grip.blend.
+
+The tests run on the dev PC; GitHub CI doesn't run them on push. When the PC is offline, the manual `fallback.yml` workflow runs all of them, `test_blender.py` with the `bpy` module.
