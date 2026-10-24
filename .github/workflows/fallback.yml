@@ -1,0 +1,42 @@
+name: Fallback tests
+
+# Tests run on the dev PC. Run this by hand only when the PC is offline:
+#   gh workflow run fallback.yml --ref <branch>
+# It runs all the tests, test_blender.py with the bpy module. The add-on has nothing to build.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fallback
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # bpy wheels exist only for the Python version Blender bundles.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install bpy
+        # The series in blender_version_min.
+        run: |
+          series=$(sed -nE 's/^blender_version_min = "([0-9]+\.[0-9]+).*/\1/p' orca_3mf/blender_manifest.toml)
+          sudo apt-get update -q
+          sudo apt-get install -yq libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6 libgl1 libegl1
+          pip install "bpy~=$series.0"
+
+      - name: Tests
+        run: |
+          python -I tests/test_build.py
+          python -I tests/test_seams.py
+          python -I tests/test_blender.py
+          python -I tests/test_reload.py
+          python -I tests/test_paths.py
