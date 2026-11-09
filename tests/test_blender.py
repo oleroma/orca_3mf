@@ -329,13 +329,19 @@ class OrcaTabTest(unittest.TestCase):
         outside = os.path.join(self.dir, "elsewhere", "lid.stl")
         fixtures.write_stl(outside, fixtures.box((10, 10, 10)))
         self.add_part(outside)
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        scene = bpy.context.scene
+        scene.orca_reload.stl_root = "../stl"
         report = self.build()
         # Below the STL root: from the 3MF's folder. Outside it: the full path
         self.assertEqual(self.source_files(), ["../../stl/GripV/parts/box.stl", outside])
-        self.assertIn("GripV/GripV_parts.3mf (new)", report)
+        # Shown from the .blend file's folder, the full path only outside the roots
+        self.assertIn("../orca/GripV/GripV_parts.3mf (new)", report)
         self.assertNotIn(self.out(), report)
-        self.assertEqual(props.shown(scene, self.out()), "GripV/GripV_parts.3mf")
-        self.assertEqual(props.shown(scene, self.stl), "GripV/parts/box.stl")
+        self.assertEqual(props.shown(scene, self.out()), "../orca/GripV/GripV_parts.3mf")
+        self.assertEqual(props.shown(scene, self.stl), "../stl/GripV/parts/box.stl")
         self.assertEqual(props.shown(scene, outside), outside)
         # The relative source_file still finds the STL when the project is imported and rebuilt
         self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})

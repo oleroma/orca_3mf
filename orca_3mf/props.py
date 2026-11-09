@@ -159,16 +159,13 @@ def part_relative(scene, project, plate, path):
 
 
 def shown(scene, path):
-    """A path as the tab shows it: below the 3MF root or the STL root (the nearer one), with / between folders, or
-    the full path when it is outside both."""
+    """A path as the tab shows it: from the .blend file's folder with / between folders (../stl/GripV/box.stl), the
+    way the roots are saved, when it is below the 3MF root or the STL root; the full path when it is outside both."""
     if not path:
         return path
-    best = path
-    for root in (project_root(scene), stl_root(scene)):
-        rel = paths.relative_to(path, root)
-        if rel != path and (best == path or len(rel) < len(best)):
-            best = rel
-    return best
+    if all(paths.relative_to(path, root) == path for root in (project_root(scene), stl_root(scene))):
+        return path
+    return blend_relative(path)
 
 
 def project_root(scene):
