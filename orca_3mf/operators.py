@@ -189,11 +189,11 @@ class ORCA_OT_add_parts(bpy.types.Operator):
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = props.active_plate(project)
-        base = props.plate_folder(context.scene, project, plate)
         names = sorted(f.name for f in self.files if f.name.lower().endswith(".stl"))
         for name in names:
             part = plate.parts.add()
-            part.path = paths.relative_form(os.path.normpath(os.path.join(self.directory, name)), base)
+            part.path = props.part_relative(context.scene, project, plate,
+                                            os.path.normpath(os.path.join(self.directory, name)))
             part.name = name
         if names:
             plate.part_index = len(plate.parts) - 1
@@ -230,8 +230,7 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         if part is None or not self.filepath:
             return {'CANCELLED'}
         old_file = os.path.basename(part.path.replace("\\", "/"))
-        part.path = paths.relative_form(os.path.normpath(self.filepath),
-                                        props.plate_folder(context.scene, project, plate))
+        part.path = props.part_relative(context.scene, project, plate, os.path.normpath(self.filepath))
         if not part.name or part.name in {old_file, os.path.splitext(old_file)[0]}:
             part.name = os.path.basename(self.filepath)
         return {'FINISHED'}
@@ -278,16 +277,15 @@ class ORCA_OT_import_project(bpy.types.Operator):
         for name, parts in plates:
             plate = project.plates.add()
             plate.name = name
-            paths = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in parts if p.stl]
-            plate.stl_folder = build3mf.common_folder([p for p in paths if not os.path.isabs(p)])
+            below = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in parts if p.stl]
+            plate.stl_folder = build3mf.common_folder([p for p in below if not os.path.isabs(p)])
             for p in parts:
                 part = plate.parts.add()
                 part.name = p.name
                 if p.stl:
-                    part.path = build3mf.strip_folder(build3mf.strip_folder(rel[p.stl], project.stl_folder),
-                                                      plate.stl_folder)
+                    part.path = props.part_relative(scene, project, plate, p.stl)
                 else:
-                    part.path = p.source.replace("\\", "/")
+                    part.path = _source_path(scene, project, plate, p.source, os.path.dirname(path))
                     problems.append("%s: %s not found below the STL root, %s" % (p.name, p.source, p.note))
                 part.up = p.up
                 part.angle = p.angle
@@ -302,6 +300,16 @@ class ORCA_OT_import_project(bpy.types.Operator):
                     "Imported %d plates, %d parts%s" % (len(plates), count,
                                                          "; check the Info panel" if problems else ""))
         return {'FINISHED'}
+
+
+def _source_path(scene, project, plate, source, project_dir):
+    """A part whose STL was not found keeps the path Orca stored, saved from its plate's folder like any other part
+    when it is a path on this system (a relative one starts at the 3MF file's folder, as in Orca)."""
+    if not source:
+        return ""
+    if os.path.isabs(source) or not paths.is_absolute(source):
+        return props.part_relative(scene, project, plate, os.path.normpath(os.path.join(project_dir, source)))
+    return source.replace("\\", "/")  # a path from the other system (C:\\... on Linux): kept as Orca stored it
 
 
 def project_spec(context, project, painted):

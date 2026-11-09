@@ -283,6 +283,32 @@ class OrcaTabTest(unittest.TestCase):
         report = self.build(settings.project_index)
         self.assertIn("(rebuilt)", report)
 
+    def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
+        from bl_ext.orca_test.orca_3mf import props
+        scene = bpy.context.scene
+        settings = scene.orca_reload
+        project = self.add_project()
+        part = self.add_part()
+        outside = os.path.join(self.dir, "elsewhere", "lid.stl")
+        fixtures.write_stl(outside, fixtures.box((10, 10, 10), center=(30, -40, 5)))
+        part.path = outside
+        self.build()
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        settings.stl_root = "../stl"
+        # Found, but outside the STL root: saved from the plate's folder, not as a full path
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        imported = settings.projects[settings.project_index]
+        plate = imported.plates[0]
+        self.assertEqual(plate.parts[0].path, "../elsewhere/lid.stl")
+        self.assertEqual(props.part_path(scene, imported, plate, plate.parts[0]), outside)
+        # Not found: Orca's stored path, saved the same way
+        os.rename(outside, outside + ".moved")
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        imported = settings.projects[settings.project_index]
+        self.assertEqual(imported.plates[0].parts[0].path, "../elsewhere/lid.stl")
+
     def test_stl_root_falls_back_to_combi_export(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene

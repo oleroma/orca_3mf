@@ -47,8 +47,9 @@ def relative_to(path, base):
 
 def relative_form(path, base):
     """`path` written from `base` with / between folders (../stl/GripV), as a picked folder or file is saved; the
-    absolute path when there is no way there from `base` (no base, or another drive)."""
-    if not base:
+    absolute path when there is no way there from `base`: no base, a base that is not absolute itself (the .blend
+    file is not saved yet, so a relative root has no fixed place), or another drive."""
+    if not base or not is_absolute(base):
         return path
     try:
         rel = ospath.relpath(path, base)

@@ -81,6 +81,10 @@ class LinuxPaths(unittest.TestCase):
         self.assertEqual(paths.relative_form(self.p("blender"), self.blend_dir), ".")
         self.assertEqual(paths.relative_form(self.p("blender", "stl", "box.stl"), self.blend_dir), "stl/box.stl")
         self.assertEqual(paths.relative_form(self.p("stl"), ""), self.p("stl"))  # the .blend is not saved
+        # A part's plate folder below a relative root while the .blend is not saved: no fixed place to start from
+        self.assertEqual(paths.relative_form(self.p("stl", "box.stl"), self.ospath.join("..", "stl")),
+                         self.p("stl", "box.stl"))
+        self.assertEqual(paths.relative_form(self.p("stl", "GripV", "box.stl"), self.p("stl")), "GripV/box.stl")
         # What is saved resolves back to the same folder
         for folder in (self.p("stl"), self.p("blender"), self.ospath.normpath(self.other)):
             self.assertEqual(paths.absolute(paths.relative_form(folder, self.blend_dir), self.blend_dir), folder)

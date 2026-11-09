@@ -152,6 +152,12 @@ def part_path(scene, project, plate, part):
     return paths.join(plate_folder(scene, project, plate), part.path)
 
 
+def part_relative(scene, project, plate, path):
+    """A part's STL as it is saved: from its plate's folder (../shared/box.stl when outside it), or absolute when there
+    is no way there from that folder (the .blend is not saved and the STL root is relative, or another drive)."""
+    return paths.relative_form(path, plate_folder(scene, project, plate))
+
+
 def project_root(scene):
     """The 3MF root; empty is the .blend file's folder."""
     return absolute(scene.orca_reload.project_root or "//")
