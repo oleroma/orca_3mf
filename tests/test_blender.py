@@ -317,6 +317,32 @@ class OrcaTabTest(unittest.TestCase):
         imported = settings.projects[settings.project_index]
         self.assertEqual(imported.plates[0].parts[0].path, "../elsewhere/lid.stl")
 
+    def source_files(self):
+        with zipfile.ZipFile(self.out()) as z:
+            return re.findall(r'key="source_file" value="([^"]*)"', z.read("Metadata/model_settings.config").decode())
+
+    def test_paths_in_the_3mf_and_the_tab_start_at_the_roots(self):
+        from bl_ext.orca_test.orca_3mf import props
+        scene = bpy.context.scene
+        project = self.add_project()
+        self.add_part()
+        outside = os.path.join(self.dir, "elsewhere", "lid.stl")
+        fixtures.write_stl(outside, fixtures.box((10, 10, 10)))
+        self.add_part(outside)
+        report = self.build()
+        # Below the STL root: from the 3MF's folder. Outside it: the full path
+        self.assertEqual(self.source_files(), ["../../stl/GripV/parts/box.stl", outside])
+        self.assertIn("GripV/GripV_parts.3mf (new)", report)
+        self.assertNotIn(self.out(), report)
+        self.assertEqual(props.shown(scene, self.out()), "GripV/GripV_parts.3mf")
+        self.assertEqual(props.shown(scene, self.stl), "GripV/parts/box.stl")
+        self.assertEqual(props.shown(scene, outside), outside)
+        # The relative source_file still finds the STL when the project is imported and rebuilt
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        imported = scene.orca_reload.projects[scene.orca_reload.project_index]
+        self.assertEqual(props.part_path(scene, imported, imported.plates[0], imported.plates[0].parts[0]), self.stl)
+        self.assertIn("(rebuilt)", self.build(scene.orca_reload.project_index))
+
     def test_stl_root_falls_back_to_combi_export(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene

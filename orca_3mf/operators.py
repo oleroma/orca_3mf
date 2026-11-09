@@ -273,7 +273,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
         found = [p.stl for _, parts in plates for p in parts if p.stl]
         rel = {p: props.relative_to(p, stl_root) for p in found}
         project.stl_folder = build3mf.common_folder([r for r in rel.values() if not os.path.isabs(r)])
-        lines = ["Imported %s" % path]
+        lines = ["Imported %s" % props.shown(scene, path)]
         for name, parts in plates:
             plate = project.plates.add()
             plate.name = name
@@ -338,11 +338,21 @@ def project_spec(context, project, painted):
                                                                   problem))
                 else:
                     seam = _seam_function(line, settings, painted, who)
-            parts.append(build3mf.PartSpec(part.label(), props.part_path(scene, project, plate, part), part.up,
-                                           part.angle, part.copies, seam, mirror=part.mirror))
+            stl = props.part_path(scene, project, plate, part)
+            parts.append(build3mf.PartSpec(part.label(), stl, part.up, part.angle, part.copies, seam,
+                                           mirror=part.mirror, source=_source_file(scene, project, stl)))
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
     template = props.absolute(project.template)
-    return build3mf.ProjectSpec(props.project_path(scene, project), plates, template), problems
+    return build3mf.ProjectSpec(props.project_path(scene, project), plates, template,
+                                shown=lambda p: props.shown(scene, p)), problems
+
+
+def _source_file(scene, project, stl):
+    """The STL path written into the 3MF: from the 3MF's folder when the STL is below the STL root (Orca reads a
+    relative source_file from there), else the full path."""
+    if paths.relative_to(stl, props.stl_root(scene)) == stl:
+        return stl
+    return paths.relative_form(stl, os.path.dirname(props.project_path(scene, project)))
 
 
 def _seam_function(line, settings, painted, who):
@@ -405,17 +415,17 @@ class ORCA_OT_build(bpy.types.Operator):
             key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
             if len(by_path[key]) > 1:
                 others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
-                lines += ["%s" % props.project_path(context.scene, project),
+                lines += [props.shown(context.scene, props.project_path(context.scene, project)),
                           "  problem: same 3MF file as %s" % others, "  not written", ""]
                 continue
             spec, problems = project_spec(context, project, painted)
             if problems:
-                lines += ["%s" % spec.path] + ["  problem: %s" % p for p in problems] + ["  not written", ""]
+                lines += [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] + ["  not written", ""]
                 continue
             try:
                 text, ok = build3mf.build(spec, stl_cache)
             except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError, ValueError) as e:
-                text, ok = ["%s" % spec.path, "  problem: %s" % e, "  not written"], False
+                text, ok = [spec.shown(spec.path), "  problem: %s" % e, "  not written"], False
             lines += text + [""]
             written += ok
         _show_log(context, lines)

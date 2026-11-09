@@ -133,8 +133,9 @@ class VIEW3D_PT_orca_reload(_OrcaPanel, bpy.types.Panel):
         field.operator("orca_reload.browse_root", text="", icon=ICONS['DIR']).root = 'STL_ROOT'
         if not settings.stl_root:
             hint = draw_label_row(layout, "")
-            hint.label(text=("Combi Export's root" if getattr(scene, "batch_stl_root_dir", "")
-                             else "the .blend file's folder") + ": " + props.stl_root(scene))
+            where = props.blend_relative(props.stl_root(scene))  # from the .blend file's folder, like a root
+            hint.label(text="Combi Export's root: " + where if getattr(scene, "batch_stl_root_dir", "")
+                       else "the .blend file's folder" + ("" if where == "." else ": " + where))
 
         row = draw_label_row(layout, "3MF root:")
         field = row.row(align=True)
@@ -238,7 +239,7 @@ class VIEW3D_PT_orca_reload_projects(_OrcaPanel, bpy.types.Panel):
         if project is None:
             return
         box = layout.box()
-        box.label(text=props.project_path(scene, project), icon=ICONS['PROJECT'])
+        box.label(text=props.shown(scene, props.project_path(scene, project)), icon=ICONS['PROJECT'])
         row = draw_label_row(box, "STL folder:")
         row.prop(project, "stl_folder", text="", icon=ICONS['DIR'])
         row = draw_label_row(box, "Settings from:")
@@ -305,7 +306,7 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         path = props.part_path(scene, project, plate, part) if part.path else ""
         row = box.row()
         row.alert = bool(path) and not os.path.isfile(path)
-        row.label(text=path or "No STL file", icon=ICONS['STL'])
+        row.label(text=props.shown(scene, path) or "No STL file", icon=ICONS['STL'])
         row = draw_label_row(box, "STL:")
         row.prop(part, "path", text="")
         row.operator("orca_reload.browse_part", text="", icon=ICONS['DIR'])

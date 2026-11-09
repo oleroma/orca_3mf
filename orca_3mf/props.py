@@ -158,6 +158,19 @@ def part_relative(scene, project, plate, path):
     return paths.relative_form(path, plate_folder(scene, project, plate))
 
 
+def shown(scene, path):
+    """A path as the tab shows it: below the 3MF root or the STL root (the nearer one), with / between folders, or
+    the full path when it is outside both."""
+    if not path:
+        return path
+    best = path
+    for root in (project_root(scene), stl_root(scene)):
+        rel = paths.relative_to(path, root)
+        if rel != path and (best == path or len(rel) < len(best)):
+            best = rel
+    return best
+
+
 def project_root(scene):
     """The 3MF root; empty is the .blend file's folder."""
     return absolute(scene.orca_reload.project_root or "//")
