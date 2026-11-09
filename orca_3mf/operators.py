@@ -421,11 +421,11 @@ class ORCA_OT_build(bpy.types.Operator):
         wm = context.window_manager
         if context.window is None:  # no window to show the progress in
             return self.execute(context)
-        if wm.orca_reload_building != props.BUILD_IDLE:
+        if props.building() != props.BUILD_IDLE:
             self.report({'WARNING'}, "A build is running; Esc stops it")
             return {'CANCELLED'}
         self._steps = _build_steps(self, context, projects)
-        wm.orca_reload_building = self.index if self.index >= 0 else props.BUILD_ALL
+        props.set_building(self.index if self.index >= 0 else props.BUILD_ALL)
         wm.orca_reload_progress = 0.0
         wm.orca_reload_status = "Starting"
         self._timer = wm.event_timer_add(0.01, window=context.window)
@@ -433,6 +433,14 @@ class ORCA_OT_build(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
+        try:
+            return self._step(context, event)
+        except Exception:  # never leave the Build buttons greyed out
+            self._steps.close()
+            self._finish(context)
+            raise
+
+    def _step(self, context, event):
         wm = context.window_manager
         if event.type == 'ESC' and event.value == 'PRESS':
             self._steps.close()  # writes the log of what was built so far
@@ -445,9 +453,6 @@ class ORCA_OT_build(bpy.types.Operator):
         except StopIteration:
             self._finish(context)
             return {'FINISHED'}
-        except Exception:
-            self._finish(context)
-            raise
         wm.orca_reload_progress = done / total if total else 1.0
         wm.orca_reload_status = status
         _redraw(context)
@@ -456,7 +461,7 @@ class ORCA_OT_build(bpy.types.Operator):
     def _finish(self, context):
         wm = context.window_manager
         wm.event_timer_remove(self._timer)
-        wm.orca_reload_building = props.BUILD_IDLE
+        props.set_building(props.BUILD_IDLE)
         wm.orca_reload_progress = 0.0
         wm.orca_reload_status = ""
         _redraw(context)

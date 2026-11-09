@@ -380,9 +380,25 @@ class OrcaTabTest(unittest.TestCase):
         steps.close()
         log = bpy.data.texts["Orca build report"].as_string()
         self.assertIn("Stopped: 1 of 2 projects written", log)
+        # The modal steps on timer ticks only, as Blender's events come (they carry no timer of their own)
+        import types
+        op = types.SimpleNamespace(_steps=operators._build_steps(reports, bpy.context, list(settings.projects)),
+                                   _finish=lambda context: setattr(op, "finished", True), finished=False)
+        Build = operators.ORCA_OT_build
+        op._step = types.MethodType(Build._step, op)
+        tick = types.SimpleNamespace(type='TIMER', value='NOTHING')
+        self.assertEqual(Build.modal(op, bpy.context, types.SimpleNamespace(type='MOUSEMOVE', value='NOTHING')),
+                         {'PASS_THROUGH'})
+        results = []
+        while not op.finished:
+            results.append(Build.modal(op, bpy.context, tick))
+        self.assertEqual(results[-1], {'FINISHED'})
+        self.assertTrue(results[:-1] and all(r == {'RUNNING_MODAL'} for r in results[:-1]))
+        self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
         # With no window (a script, or Blender in the background) the button builds at once
         self.assertEqual(bpy.ops.orca_reload.build('INVOKE_DEFAULT', index=0), {'FINISHED'})
-        self.assertEqual(bpy.context.window_manager.orca_reload_building, -2)
+        from bl_ext.orca_test.orca_3mf import props
+        self.assertEqual(props.building(), props.BUILD_IDLE)
 
     def test_stl_root_falls_back_to_combi_export(self):
         from bl_ext.orca_test.orca_3mf import props
@@ -527,9 +543,10 @@ class OrcaTabTest(unittest.TestCase):
             cls.draw_item(None, context, Layout(), data, item, 0, None, "", 0)
         # While a build runs, its progress bar takes the place of the project row or of the 3MF root
         wm = context.window_manager
-        self.addCleanup(setattr, wm, "orca_reload_building", -2)
+        from bl_ext.orca_test.orca_3mf import props
+        self.addCleanup(props.set_building, props.BUILD_IDLE)
         for building in (0, -1):
-            wm.orca_reload_building = building
+            props.set_building(building)
             wm.orca_reload_status = "GripV_parts: box.stl"
             layout = Layout()
             ui.ORCA_UL_projects.draw_item(None, context, layout, context.scene.orca_reload, project, 0, None, "", 0)

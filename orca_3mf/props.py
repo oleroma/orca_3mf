@@ -216,7 +216,17 @@ def from_dict(item, data):
 classes = (OrcaPart, OrcaPlate, OrcaProject, OrcaLogLine, OrcaSettings)
 
 
-BUILD_IDLE, BUILD_ALL = -2, -1  # window_manager.orca_reload_building: no build, Build all, else the project's index
+BUILD_IDLE, BUILD_ALL = -2, -1  # building(): no build, Build all, else the project's index
+_building = [BUILD_IDLE]  # kept here, not in the .blend, so a restart or a reload always starts with no build
+
+
+def building():
+    """Which build runs now: BUILD_IDLE, BUILD_ALL or the index of the project."""
+    return _building[0]
+
+
+def set_building(which):
+    _building[0] = which
 
 
 def register_properties():
@@ -225,8 +235,7 @@ def register_properties():
     wm.orca_reload_log = bpy.props.CollectionProperty(type=OrcaLogLine)
     wm.orca_reload_log_index = bpy.props.IntProperty()
     wm.orca_reload_tips = bpy.props.BoolProperty(name="Guide", default=False)
-    # The build in progress (not saved): which one, how far, and what it does now
-    wm.orca_reload_building = bpy.props.IntProperty(default=BUILD_IDLE, options={'SKIP_SAVE'})
+    # How far the build in progress is, and what it does now
     wm.orca_reload_progress = bpy.props.FloatProperty(name="Progress", subtype='FACTOR', min=0.0, max=1.0,
                                                       options={'SKIP_SAVE'})
     wm.orca_reload_status = bpy.props.StringProperty(options={'SKIP_SAVE'})
@@ -236,7 +245,6 @@ def unregister_properties():
     wm = bpy.types.WindowManager
     del wm.orca_reload_status
     del wm.orca_reload_progress
-    del wm.orca_reload_building
     del wm.orca_reload_tips
     del wm.orca_reload_log_index
     del wm.orca_reload_log

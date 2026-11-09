@@ -74,10 +74,10 @@ class ORCA_UL_projects(bpy.types.UIList):
         row = layout.row(align=True)
         wm = context.window_manager
         build = row.row(align=True)
-        build.enabled = wm.orca_reload_building == BUILD_IDLE
+        build.enabled = props.building() == BUILD_IDLE
         build.operator("orca_reload.build", text="", icon=ICONS['BUILD']).index = index
         row.separator(factor=BUILD_BUTTON_GAP)
-        if wm.orca_reload_building == index:
+        if props.building() == index:
             draw_progress(row, wm)
             return
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
@@ -152,13 +152,13 @@ class VIEW3D_PT_orca_reload(_OrcaPanel, bpy.types.Panel):
         row = draw_label_row(layout, "3MF root:")
         wm = context.window_manager
         field = row.row(align=True)
-        if wm.orca_reload_building == BUILD_ALL:
+        if props.building() == BUILD_ALL:
             draw_progress(field, wm)
         else:
             field.prop(settings, "project_root", text="")
             field.operator("orca_reload.browse_root", text="", icon=ICONS['DIR']).root = 'PROJECT_ROOT'
         buttons = row.row(align=True)
-        buttons.enabled = wm.orca_reload_building == BUILD_IDLE
+        buttons.enabled = props.building() == BUILD_IDLE
         buttons.operator("orca_reload.import_project", text="", icon=ICONS['IMPORT'])
         buttons.operator("orca_reload.build", text="", icon=ICONS['BUILD']).index = -1
 
