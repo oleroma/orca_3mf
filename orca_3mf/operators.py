@@ -438,7 +438,7 @@ class ORCA_OT_build(bpy.types.Operator):
             self._steps.close()  # writes the log of what was built so far
             self._finish(context)
             return {'CANCELLED'}
-        if event.type != 'TIMER' or event.timer is not self._timer:
+        if event.type != 'TIMER':
             return {'PASS_THROUGH'}
         try:
             done, total, status = next(self._steps)
