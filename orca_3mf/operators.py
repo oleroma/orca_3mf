@@ -267,7 +267,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
         settings.project_index = len(settings.projects) - 1
         project.name = os.path.basename(path)
         root = props.project_root(scene)
-        project.folder = props.relative_to(os.path.dirname(path), root)
+        project.folder = paths.relative_form(os.path.dirname(path), root)  # ../other when outside the root
         if project.folder == ".":
             project.folder = ""
         found = [p.stl for _, parts in plates for p in parts if p.stl]

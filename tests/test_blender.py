@@ -303,6 +303,14 @@ class OrcaTabTest(unittest.TestCase):
         plate = imported.plates[0]
         self.assertEqual(plate.parts[0].path, "../elsewhere/lid.stl")
         self.assertEqual(props.part_path(scene, imported, plate, plate.parts[0]), outside)
+        # A 3MF outside the 3MF root: its folder is saved from the root too
+        moved = os.path.join(self.dir, "other", "GripV_parts.3mf")
+        os.makedirs(os.path.dirname(moved))
+        shutil.copy(self.out(), moved)
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=moved), {'FINISHED'})
+        imported = settings.projects[settings.project_index]
+        self.assertEqual(imported.folder, "../other")
+        self.assertEqual(props.project_path(scene, imported), moved)
         # Not found: Orca's stored path, saved the same way
         os.rename(outside, outside + ".moved")
         self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
