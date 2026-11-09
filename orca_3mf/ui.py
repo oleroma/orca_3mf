@@ -6,6 +6,7 @@ import os
 import bpy
 
 from . import props
+from .props import BUILD_ALL, BUILD_IDLE
 
 ICONS = {
     'PROJECT': 'FILE_3D', 'PLATE': 'MESH_GRID', 'PART': 'OBJECT_DATA', 'COPIES': 'DUPLICATE',
@@ -47,6 +48,11 @@ def draw_stats(layout, stats):
         row.label(text=str(value), icon=ICONS[icon])
 
 
+def draw_progress(layout, wm):
+    """The build's progress bar, like Combi Export's: what it does now on the bar. Esc stops the build."""
+    layout.prop(wm, "orca_reload_progress", text=wm.orca_reload_status + "  (Esc to stop)", slider=True)
+
+
 def draw_label_row(layout, label, units=ROOT_LABEL_UNITS):
     """A row with a right-aligned label of fixed width, for a field that follows."""
     row = layout.row()
@@ -66,8 +72,14 @@ def counts(projects):
 class ORCA_UL_projects(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         row = layout.row(align=True)
-        row.operator("orca_reload.build", text="", icon=ICONS['BUILD']).index = index
+        wm = context.window_manager
+        build = row.row(align=True)
+        build.enabled = wm.orca_reload_building == BUILD_IDLE
+        build.operator("orca_reload.build", text="", icon=ICONS['BUILD']).index = index
         row.separator(factor=BUILD_BUTTON_GAP)
+        if wm.orca_reload_building == index:
+            draw_progress(row, wm)
+            return
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.prop(item, "name", text="", emboss=False)
         row.prop(item, "folder", text="", emboss=False, icon=ICONS['DIR'])
@@ -138,10 +150,15 @@ class VIEW3D_PT_orca_reload(_OrcaPanel, bpy.types.Panel):
                        else "the .blend file's folder" + ("" if where == "." else ": " + where))
 
         row = draw_label_row(layout, "3MF root:")
+        wm = context.window_manager
         field = row.row(align=True)
-        field.prop(settings, "project_root", text="")
-        field.operator("orca_reload.browse_root", text="", icon=ICONS['DIR']).root = 'PROJECT_ROOT'
+        if wm.orca_reload_building == BUILD_ALL:
+            draw_progress(field, wm)
+        else:
+            field.prop(settings, "project_root", text="")
+            field.operator("orca_reload.browse_root", text="", icon=ICONS['DIR']).root = 'PROJECT_ROOT'
         buttons = row.row(align=True)
+        buttons.enabled = wm.orca_reload_building == BUILD_IDLE
         buttons.operator("orca_reload.import_project", text="", icon=ICONS['IMPORT'])
         buttons.operator("orca_reload.build", text="", icon=ICONS['BUILD']).index = -1
 
@@ -202,6 +219,7 @@ GUIDE = (
     )),
     ("Building:", 'BUILD', (
         "Build (row button) writes that project, the Build button by the 3MF root all ticked ones",
+        "While it builds, a progress bar takes the row's place (or the 3MF root's); Esc stops it",
         "A new project takes the printer, process and filament settings from Settings from",
         "An existing project keeps its settings, each part's settings (by name) and each plate's",
         "A part whose shape did not change keeps its painting from Orca",

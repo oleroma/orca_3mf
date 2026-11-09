@@ -396,44 +396,138 @@ class ORCA_OT_build(bpy.types.Operator):
                     "gap, seams painted. An existing file keeps its printer settings and each part's own settings")
         return "Build every ticked project"
 
-    def execute(self, context):
+    def _projects(self, context):
         settings = context.scene.orca_reload
         if self.index >= 0:
-            projects = [settings.projects[self.index]] if self.index < len(settings.projects) else []
-        else:
-            projects = [p for p in settings.projects if p.use]
+            return [settings.projects[self.index]] if self.index < len(settings.projects) else []
+        return [p for p in settings.projects if p.use]
+
+    def execute(self, context):
+        """Builds at once (from a script, or with no window to show the progress in)."""
+        projects = self._projects(context)
         if not projects:
             self.report({'ERROR'}, "No project to build")
             return {'CANCELLED'}
-        stl_cache, painted = {}, {}
-        lines, written = [], 0
-        by_path = {}
-        for project in projects:
-            key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
-            by_path.setdefault(key, []).append(project)
-        for project in projects:
-            key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
+        for _ in _build_steps(self, context, projects):
+            pass
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        """Builds one part per step, with a progress bar in place of the Build button; Esc stops the build."""
+        projects = self._projects(context)
+        if not projects:
+            self.report({'ERROR'}, "No project to build")
+            return {'CANCELLED'}
+        wm = context.window_manager
+        if context.window is None:  # no window to show the progress in
+            return self.execute(context)
+        if wm.orca_reload_building != props.BUILD_IDLE:
+            self.report({'WARNING'}, "A build is running; Esc stops it")
+            return {'CANCELLED'}
+        self._steps = _build_steps(self, context, projects)
+        wm.orca_reload_building = self.index if self.index >= 0 else props.BUILD_ALL
+        wm.orca_reload_progress = 0.0
+        wm.orca_reload_status = "Starting"
+        self._timer = wm.event_timer_add(0.01, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        wm = context.window_manager
+        if event.type == 'ESC' and event.value == 'PRESS':
+            self._steps.close()  # writes the log of what was built so far
+            self._finish(context)
+            return {'CANCELLED'}
+        if event.type != 'TIMER' or event.timer is not self._timer:
+            return {'PASS_THROUGH'}
+        try:
+            done, total, status = next(self._steps)
+        except StopIteration:
+            self._finish(context)
+            return {'FINISHED'}
+        except Exception:
+            self._finish(context)
+            raise
+        wm.orca_reload_progress = done / total if total else 1.0
+        wm.orca_reload_status = status
+        _redraw(context)
+        return {'RUNNING_MODAL'}
+
+    def _finish(self, context):
+        wm = context.window_manager
+        wm.event_timer_remove(self._timer)
+        wm.orca_reload_building = props.BUILD_IDLE
+        wm.orca_reload_progress = 0.0
+        wm.orca_reload_status = ""
+        _redraw(context)
+
+
+def _redraw(context):
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+def _build_steps(operator, context, projects):
+    """Builds the projects, one part per step: yields (steps done, steps in all, what comes next). Each project
+    reads its parts' STLs and paints their seams one per step, then writes its 3MF in a step of its own. Stopped
+    early (closed), it still writes the log of what it built."""
+    scene = context.scene
+    stl_cache, painted = {}, {}
+    lines, written, stopped = [], 0, True
+    by_path = {}
+    for project in projects:
+        key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
+        by_path.setdefault(key, []).append(project)
+    total = sum(sum(1 for pl in pr.plates if pl.use for pa in pl.parts if pa.use) + 1 for pr in projects)
+    done = 0
+    try:
+        for number, project in enumerate(projects, 1):
+            where = "%s (%d/%d)" % (project.name, number, len(projects)) if len(projects) > 1 else project.name
+            steps = sum(1 for pl in project.plates if pl.use for pa in pl.parts if pa.use) + 1
+            key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
             if len(by_path[key]) > 1:
                 others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
-                lines += [props.shown(context.scene, props.project_path(context.scene, project)),
+                lines += [props.shown(scene, props.project_path(scene, project)),
                           "  problem: same 3MF file as %s" % others, "  not written", ""]
+                done += steps
                 continue
+            yield done, total, "%s: seams" % where
             spec, problems = project_spec(context, project, painted)
             if problems:
                 lines += [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] + ["  not written", ""]
+                done += steps
                 continue
+            start = done
+            for plate in spec.plates:
+                for part in plate.parts:
+                    yield done, total, "%s: %s" % (where, part.name)
+                    try:  # read and paint now, so the build below finds them ready; it reports any problem
+                        mesh, _ = build3mf._load(part, stl_cache)
+                        if part.seam:
+                            part.seam(part.stl, mesh)
+                    except (reload3mf.ReloadError, OSError, ValueError):
+                        pass
+                    done += 1
+            done = start + steps - 1
+            yield done, total, "%s: writing" % where
             try:
                 text, ok = build3mf.build(spec, stl_cache)
             except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError, ValueError) as e:
                 text, ok = [spec.shown(spec.path), "  problem: %s" % e, "  not written"], False
             lines += text + [""]
             written += ok
+            done += 1
+        stopped = False
+    finally:
+        if stopped:
+            lines.append("Stopped: %d of %d projects written" % (written, len(projects)))
         _show_log(context, lines)
         failed = len(projects) - written
-        self.report({'WARNING'} if failed else {'INFO'},
-                    "%d of %d projects written%s" % (written, len(projects),
-                                                     "; see the Info panel" if failed else ""))
-        return {'FINISHED'}
+        operator.report({'WARNING'} if failed else {'INFO'},
+                        "%d of %d projects written%s" % (written, len(projects),
+                                                         "; see the Info panel" if failed else ""))
 
 
 class ORCA_OT_clear_log(bpy.types.Operator):

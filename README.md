@@ -52,7 +52,7 @@ The line is snapped onto the part's surface within **Snap**, so one line serves 
 ## Build
 
 1. Export the STLs with Combi Export.
-2. Press the Build button of a project row, or the one next to the 3MF root for every ticked project.
+2. Press the Build button of a project row, or the one next to the 3MF root for every ticked project. While it builds, a progress bar like Combi Export's takes the place of that row (or of the 3MF root), naming the part it is on; Esc stops the build, and what was written so far is kept.
 
 A **new** project takes its printer, process and filament settings from **Settings from**: any Orca project made for your printer. A project added to the list starts with the Settings from of the selected project, or that project's own file. Orca opens a project without settings as bare parts, without its plates, so Build refuses to write one.
 

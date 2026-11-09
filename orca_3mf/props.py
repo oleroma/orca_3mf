@@ -216,16 +216,27 @@ def from_dict(item, data):
 classes = (OrcaPart, OrcaPlate, OrcaProject, OrcaLogLine, OrcaSettings)
 
 
+BUILD_IDLE, BUILD_ALL = -2, -1  # window_manager.orca_reload_building: no build, Build all, else the project's index
+
+
 def register_properties():
     bpy.types.Scene.orca_reload = bpy.props.PointerProperty(type=OrcaSettings)
     wm = bpy.types.WindowManager
     wm.orca_reload_log = bpy.props.CollectionProperty(type=OrcaLogLine)
     wm.orca_reload_log_index = bpy.props.IntProperty()
     wm.orca_reload_tips = bpy.props.BoolProperty(name="Guide", default=False)
+    # The build in progress (not saved): which one, how far, and what it does now
+    wm.orca_reload_building = bpy.props.IntProperty(default=BUILD_IDLE, options={'SKIP_SAVE'})
+    wm.orca_reload_progress = bpy.props.FloatProperty(name="Progress", subtype='FACTOR', min=0.0, max=1.0,
+                                                      options={'SKIP_SAVE'})
+    wm.orca_reload_status = bpy.props.StringProperty(options={'SKIP_SAVE'})
 
 
 def unregister_properties():
     wm = bpy.types.WindowManager
+    del wm.orca_reload_status
+    del wm.orca_reload_progress
+    del wm.orca_reload_building
     del wm.orca_reload_tips
     del wm.orca_reload_log_index
     del wm.orca_reload_log

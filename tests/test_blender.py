@@ -349,6 +349,41 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual(props.part_path(scene, imported, imported.plates[0], imported.plates[0].parts[0]), self.stl)
         self.assertIn("(rebuilt)", self.build(scene.orca_reload.project_index))
 
+    def test_build_steps_report_progress_part_by_part(self):
+        from bl_ext.orca_test.orca_3mf import operators
+        settings = bpy.context.scene.orca_reload
+        self.add_project(plates=2)
+        self.add_part()
+        self.add_part(copies=3)
+        list_action('PROJECT', 'COPY')
+        list_action('PROJECT', 'PASTE')
+        settings.projects[1].name = "second"
+
+        class Reports:
+            def report(self, kind, text):
+                self.last = (kind, text)
+
+        reports = Reports()
+        steps = list(operators._build_steps(reports, bpy.context, list(settings.projects)))
+        self.assertEqual([s[1] for s in steps], [6] * len(steps))  # 2 parts + writing, for each project
+        done = [s[0] for s in steps]
+        self.assertEqual(done, sorted(done))
+        self.assertLess(done[-1], 6)
+        self.assertIn("GripV_parts (1/2): box.stl", [s[2] for s in steps])
+        self.assertEqual(steps[-1][2], "second (2/2): writing")
+        self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
+        # Stopped half way: the log says so, and what was built is kept
+        steps = operators._build_steps(reports, bpy.context, list(settings.projects))
+        for step in steps:
+            if step[2].startswith("second"):
+                break
+        steps.close()
+        log = bpy.data.texts["Orca build report"].as_string()
+        self.assertIn("Stopped: 1 of 2 projects written", log)
+        # With no window (a script, or Blender in the background) the button builds at once
+        self.assertEqual(bpy.ops.orca_reload.build('INVOKE_DEFAULT', index=0), {'FINISHED'})
+        self.assertEqual(bpy.context.window_manager.orca_reload_building, -2)
+
     def test_stl_root_falls_back_to_combi_export(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene
@@ -490,6 +525,16 @@ class OrcaTabTest(unittest.TestCase):
                 (ui.ORCA_UL_log, context.window_manager, context.window_manager.orca_reload_log[0])]
         for cls, data, item in rows:
             cls.draw_item(None, context, Layout(), data, item, 0, None, "", 0)
+        # While a build runs, its progress bar takes the place of the project row or of the 3MF root
+        wm = context.window_manager
+        self.addCleanup(setattr, wm, "orca_reload_building", -2)
+        for building in (0, -1):
+            wm.orca_reload_building = building
+            wm.orca_reload_status = "GripV_parts: box.stl"
+            layout = Layout()
+            ui.ORCA_UL_projects.draw_item(None, context, layout, context.scene.orca_reload, project, 0, None, "", 0)
+            panel = type("P", (), {"layout": Layout()})()
+            ui.VIEW3D_PT_orca_reload.draw(panel, context)
 
     def test_panels_and_operators_are_registered(self):
         for name in ("VIEW3D_PT_orca_reload", "VIEW3D_PT_orca_reload_info", "VIEW3D_PT_orca_reload_projects",
