@@ -1,5 +1,6 @@
 """Operators of the Orca tab: the list buttons, adding STLs, importing a project and Build."""
 import os
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -343,8 +344,9 @@ def project_spec(context, project, painted):
                                            mirror=part.mirror, source=_source_file(scene, project, stl)))
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
     template = props.absolute(project.template)
+    roots = props.roots(scene)
     return build3mf.ProjectSpec(props.project_path(scene, project), plates, template,
-                                shown=lambda p: props.shown(scene, p)), problems
+                                shown=lambda p: paths.shown(p, *roots)), problems
 
 
 def _source_file(scene, project, stl):
@@ -356,10 +358,11 @@ def _source_file(scene, project, stl):
 
 
 def _seam_function(line, settings, painted, who):
-    painter = seams.SeamPainter([line], width=settings.seam_width, snap=settings.snap_distance, min_share=0.0)
+    width, snap = settings.seam_width, settings.snap_distance  # now: the build may paint later, in steps
+    painter = seams.SeamPainter([line], width=width, snap=snap, min_share=0.0)
 
     def paint(path, mesh):
-        key = (os.path.normcase(path), who, line.name, settings.seam_width, settings.snap_distance)
+        key = (os.path.normcase(path), who, line.name, width, snap)
         if key not in painted:
             result = painter.paint(mesh.verts, mesh.tris, label=path)
             painted[key] = (({}, "seam line %s is not on this part (further than the snap distance)" % line.name)
@@ -413,7 +416,8 @@ class ORCA_OT_build(bpy.types.Operator):
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        """Builds one part per step, with a progress bar in place of the Build button; Esc stops the build."""
+        """Builds one part per step, with a progress bar at the end of the row; the row's Build button turns into
+        a Cancel button."""
         projects = self._projects(context)
         if not projects:
             self.report({'ERROR'}, "No project to build")
@@ -422,12 +426,13 @@ class ORCA_OT_build(bpy.types.Operator):
         if context.window is None:  # no window to show the progress in
             return self.execute(context)
         if props.building() != props.BUILD_IDLE:
-            self.report({'WARNING'}, "A build is running; Esc stops it")
+            self.report({'WARNING'}, "A build is running")
             return {'CANCELLED'}
         self._steps = _build_steps(self, context, projects)
         props.set_building(self.index if self.index >= 0 else props.BUILD_ALL)
         wm.orca_reload_progress = 0.0
-        wm.orca_reload_status = "Starting"
+        wm.orca_reload_status = "Starting... (0.0s)"
+        self._start = time.monotonic()
         self._timer = wm.event_timer_add(0.01, window=context.window)
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
@@ -442,9 +447,10 @@ class ORCA_OT_build(bpy.types.Operator):
 
     def _step(self, context, event):
         wm = context.window_manager
-        if event.type == 'ESC' and event.value == 'PRESS':
+        if props.cancel_requested():
             self._steps.close()  # writes the log of what was built so far
             self._finish(context)
+            self.report({'WARNING'}, "Build cancelled")
             return {'CANCELLED'}
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
@@ -453,10 +459,10 @@ class ORCA_OT_build(bpy.types.Operator):
         except StopIteration:
             self._finish(context)
             return {'FINISHED'}
-        wm.orca_reload_progress = done / total if total else 1.0
-        wm.orca_reload_status = status
+        wm.orca_reload_progress = done / max(1, total)
+        wm.orca_reload_status = "%s | %.1fs" % (status, time.monotonic() - self._start)
         _redraw(context)
-        return {'RUNNING_MODAL'}
+        return {'PASS_THROUGH'}
 
     def _finish(self, context):
         wm = context.window_manager
@@ -475,39 +481,46 @@ def _redraw(context):
 
 
 def _build_steps(operator, context, projects):
-    """Builds the projects, one part per step: yields (steps done, steps in all, what comes next). Each project
-    reads its parts' STLs and paints their seams one per step, then writes its 3MF in a step of its own. Stopped
-    early (closed), it still writes the log of what it built."""
+    """Builds the projects, one part per step: yields (steps done, steps in all, what comes next: Part 3/12, or
+    3MF 1/2 for writing a project). Everything is
+    taken from the scene before the first step, so editing the tab while it builds does not change the build.
+    Each project then reads its parts' STLs and paints their seams one per step, and writes its 3MF in a step of
+    its own. Stopped early (closed), it still writes the log of what it built."""
     scene = context.scene
     stl_cache, painted = {}, {}
-    lines, written, stopped = [], 0, True
     by_path = {}
     for project in projects:
         key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
         by_path.setdefault(key, []).append(project)
-    total = sum(sum(1 for pl in pr.plates if pl.use for pa in pl.parts if pa.use) + 1 for pr in projects)
-    done = 0
+    jobs = []  # (name, ProjectSpec or None, report lines when it cannot be built)
+    for project in projects:
+        where = project.name
+        key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
+        if len(by_path[key]) > 1:
+            others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
+            jobs.append((where, None, [props.shown(scene, props.project_path(scene, project)),
+                                       "  problem: same 3MF file as %s" % others, "  not written"]))
+            continue
+        spec, problems = project_spec(context, project, painted)
+        if problems:
+            jobs.append((where, None, [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] +
+                         ["  not written"]))
+        else:
+            jobs.append((where, spec, []))
+    total = sum(sum(len(plate.parts) for plate in spec.plates) + 1 for _, spec, _ in jobs if spec)
+    part_total = sum(len(plate.parts) for _, spec, _ in jobs if spec for plate in spec.plates)
+    project_total = sum(1 for _, spec, _ in jobs if spec)
+    lines, written, done, stopped = [], 0, 0, True
+    part_no = project_no = 0
     try:
-        for number, project in enumerate(projects, 1):
-            where = "%s (%d/%d)" % (project.name, number, len(projects)) if len(projects) > 1 else project.name
-            steps = sum(1 for pl in project.plates if pl.use for pa in pl.parts if pa.use) + 1
-            key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
-            if len(by_path[key]) > 1:
-                others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
-                lines += [props.shown(scene, props.project_path(scene, project)),
-                          "  problem: same 3MF file as %s" % others, "  not written", ""]
-                done += steps
+        for where, spec, problem_lines in jobs:
+            if spec is None:
+                lines += problem_lines + [""]
                 continue
-            yield done, total, "%s: seams" % where
-            spec, problems = project_spec(context, project, painted)
-            if problems:
-                lines += [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] + ["  not written", ""]
-                done += steps
-                continue
-            start = done
             for plate in spec.plates:
                 for part in plate.parts:
-                    yield done, total, "%s: %s" % (where, part.name)
+                    part_no += 1
+                    yield done, total, "Part %d/%d" % (part_no, part_total)
                     try:  # read and paint now, so the build below finds them ready; it reports any problem
                         mesh, _ = build3mf._load(part, stl_cache)
                         if part.seam:
@@ -515,8 +528,8 @@ def _build_steps(operator, context, projects):
                     except (reload3mf.ReloadError, OSError, ValueError):
                         pass
                     done += 1
-            done = start + steps - 1
-            yield done, total, "%s: writing" % where
+            project_no += 1
+            yield done, total, "3MF %d/%d" % (project_no, project_total)
             try:
                 text, ok = build3mf.build(spec, stl_cache)
             except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError, ValueError) as e:
@@ -535,6 +548,17 @@ def _build_steps(operator, context, projects):
                                                          "; see the Info panel" if failed else ""))
 
 
+class ORCA_OT_cancel_build(bpy.types.Operator):
+    bl_idname = "orca_reload.cancel_build"
+    bl_label = "Cancel Build"
+    bl_description = "Stop the build. The projects written so far are kept"
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        props.request_cancel()
+        return {'FINISHED'}
+
+
 class ORCA_OT_clear_log(bpy.types.Operator):
     bl_idname = "orca_reload.clear_log"
     bl_label = "Clear Log"
@@ -547,4 +571,4 @@ class ORCA_OT_clear_log(bpy.types.Operator):
 
 
 classes = (ORCA_OT_list_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_browse_root, ORCA_OT_browse_template,
-           ORCA_OT_import_project, ORCA_OT_build, ORCA_OT_clear_log)
+           ORCA_OT_import_project, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)

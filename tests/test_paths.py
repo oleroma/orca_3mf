@@ -90,6 +90,17 @@ class LinuxPaths(unittest.TestCase):
             self.assertEqual(paths.absolute(paths.relative_form(folder, self.blend_dir), self.blend_dir), folder)
 
 
+    def test_shown(self):
+        roots = (self.p("orca"), self.p("stl"), self.blend_dir)
+        self.assertEqual(paths.shown(self.p("stl", "GripV", "box.stl"), *roots), "../stl/GripV/box.stl")
+        self.assertEqual(paths.shown(self.p("orca", "GripV.3mf"), *roots), "../orca/GripV.3mf")
+        outside = self.p("other", "box.stl")
+        self.assertEqual(paths.shown(outside, *roots), outside)
+        self.assertEqual(paths.shown("", *roots), "")
+        self.assertEqual(paths.shown(self.p("stl", "box.stl"), self.p("orca"), self.p("stl"), ""),
+                         self.p("stl", "box.stl"))  # the .blend is not saved yet
+
+
 class WindowsPaths(LinuxPaths):
     ospath = ntpath
     blend_dir = "D:\\Grip\\blender"

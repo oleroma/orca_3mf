@@ -369,35 +369,48 @@ class OrcaTabTest(unittest.TestCase):
         done = [s[0] for s in steps]
         self.assertEqual(done, sorted(done))
         self.assertLess(done[-1], 6)
-        self.assertIn("GripV_parts (1/2): box.stl", [s[2] for s in steps])
-        self.assertEqual(steps[-1][2], "second (2/2): writing")
+        self.assertEqual([s[2] for s in steps], ["Part 1/4", "Part 2/4", "3MF 1/2", "Part 3/4", "Part 4/4",
+                                                 "3MF 2/2"])
         self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
         # Stopped half way: the log says so, and what was built is kept
         steps = operators._build_steps(reports, bpy.context, list(settings.projects))
         for step in steps:
-            if step[2].startswith("second"):
+            if step[2] == "Part 3/4":
                 break
         steps.close()
         log = bpy.data.texts["Orca build report"].as_string()
         self.assertIn("Stopped: 1 of 2 projects written", log)
-        # The modal steps on timer ticks only, as Blender's events come (they carry no timer of their own)
+        # The modal: steps on timer ticks and passes every event on, as Blender's events come (they carry no
+        # timer of their own); the Cancel button stops it
         import types
-        op = types.SimpleNamespace(_steps=operators._build_steps(reports, bpy.context, list(settings.projects)),
-                                   _finish=lambda context: setattr(op, "finished", True), finished=False)
+        from bl_ext.orca_test.orca_3mf import props
+        self.addCleanup(props.set_building, props.BUILD_IDLE)
         Build = operators.ORCA_OT_build
-        op._step = types.MethodType(Build._step, op)
         tick = types.SimpleNamespace(type='TIMER', value='NOTHING')
-        self.assertEqual(Build.modal(op, bpy.context, types.SimpleNamespace(type='MOUSEMOVE', value='NOTHING')),
-                         {'PASS_THROUGH'})
-        results = []
-        while not op.finished:
-            results.append(Build.modal(op, bpy.context, tick))
-        self.assertEqual(results[-1], {'FINISHED'})
-        self.assertTrue(results[:-1] and all(r == {'RUNNING_MODAL'} for r in results[:-1]))
-        self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
+        mouse = types.SimpleNamespace(type='MOUSEMOVE', value='NOTHING')
+        for cancel in (False, True):
+            op = types.SimpleNamespace(_steps=operators._build_steps(reports, bpy.context, list(settings.projects)),
+                                       _start=0.0, finished=False, report=reports.report)
+            op._finish = lambda context, op=op: (setattr(op, "finished", True), props.set_building(props.BUILD_IDLE))
+            op._step = types.MethodType(Build._step, op)
+            props.set_building(props.BUILD_ALL)
+            self.assertEqual(Build.modal(op, bpy.context, mouse), {'PASS_THROUGH'})
+            results = []
+            while not op.finished:
+                results.append(Build.modal(op, bpy.context, tick))
+                if cancel and len(results) == 2:
+                    self.assertEqual(bpy.ops.orca_reload.cancel_build(), {'FINISHED'})
+            if cancel:
+                self.assertEqual(results, [{'PASS_THROUGH'}] * 2 + [{'CANCELLED'}])
+                self.assertEqual(reports.last, ({'WARNING'}, "Build cancelled"))
+                self.assertIn("Stopped: 0 of 2 projects written", bpy.data.texts["Orca build report"].as_string())
+            else:
+                self.assertEqual(results, [{'PASS_THROUGH'}] * 6 + [{'FINISHED'}])
+                self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
+                self.assertTrue(bpy.context.window_manager.orca_reload_status.startswith("3MF 2/2 | "))
+            self.assertEqual(props.building(), props.BUILD_IDLE)
         # With no window (a script, or Blender in the background) the button builds at once
         self.assertEqual(bpy.ops.orca_reload.build('INVOKE_DEFAULT', index=0), {'FINISHED'})
-        from bl_ext.orca_test.orca_3mf import props
         self.assertEqual(props.building(), props.BUILD_IDLE)
 
     def test_stl_root_falls_back_to_combi_export(self):
@@ -547,7 +560,7 @@ class OrcaTabTest(unittest.TestCase):
         self.addCleanup(props.set_building, props.BUILD_IDLE)
         for building in (0, -1):
             props.set_building(building)
-            wm.orca_reload_status = "GripV_parts: box.stl"
+            wm.orca_reload_status = "Part 1/2 | 0.4s"
             layout = Layout()
             ui.ORCA_UL_projects.draw_item(None, context, layout, context.scene.orca_reload, project, 0, None, "", 0)
             panel = type("P", (), {"layout": Layout()})()
@@ -558,7 +571,7 @@ class OrcaTabTest(unittest.TestCase):
                      "VIEW3D_PT_orca_reload_plates", "VIEW3D_PT_orca_reload_parts"):
             self.assertTrue(hasattr(bpy.types, name), name)
         for op in ("list_action", "add_parts", "browse_part", "browse_root", "browse_template", "import_project",
-                   "build", "clear_log"):
+                   "build", "cancel_build", "clear_log"):
             self.assertTrue(hasattr(bpy.ops.orca_reload, op), op)
 
 
