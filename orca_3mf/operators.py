@@ -1,5 +1,6 @@
 """Operators of the Orca tab: the list buttons, adding STLs, importing a project and Build."""
 import os
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -189,11 +190,11 @@ class ORCA_OT_add_parts(bpy.types.Operator):
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = props.active_plate(project)
-        base = props.plate_folder(context.scene, project, plate)
         names = sorted(f.name for f in self.files if f.name.lower().endswith(".stl"))
         for name in names:
             part = plate.parts.add()
-            part.path = paths.relative_form(os.path.normpath(os.path.join(self.directory, name)), base)
+            part.path = props.part_relative(context.scene, project, plate,
+                                            os.path.normpath(os.path.join(self.directory, name)))
             part.name = name
         if names:
             plate.part_index = len(plate.parts) - 1
@@ -230,8 +231,7 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         if part is None or not self.filepath:
             return {'CANCELLED'}
         old_file = os.path.basename(part.path.replace("\\", "/"))
-        part.path = paths.relative_form(os.path.normpath(self.filepath),
-                                        props.plate_folder(context.scene, project, plate))
+        part.path = props.part_relative(context.scene, project, plate, os.path.normpath(self.filepath))
         if not part.name or part.name in {old_file, os.path.splitext(old_file)[0]}:
             part.name = os.path.basename(self.filepath)
         return {'FINISHED'}
@@ -268,26 +268,25 @@ class ORCA_OT_import_project(bpy.types.Operator):
         settings.project_index = len(settings.projects) - 1
         project.name = os.path.basename(path)
         root = props.project_root(scene)
-        project.folder = props.relative_to(os.path.dirname(path), root)
+        project.folder = paths.relative_form(os.path.dirname(path), root)  # ../other when outside the root
         if project.folder == ".":
             project.folder = ""
         found = [p.stl for _, parts in plates for p in parts if p.stl]
         rel = {p: props.relative_to(p, stl_root) for p in found}
         project.stl_folder = build3mf.common_folder([r for r in rel.values() if not os.path.isabs(r)])
-        lines = ["Imported %s" % path]
+        lines = ["Imported %s" % props.shown(scene, path)]
         for name, parts in plates:
             plate = project.plates.add()
             plate.name = name
-            paths = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in parts if p.stl]
-            plate.stl_folder = build3mf.common_folder([p for p in paths if not os.path.isabs(p)])
+            below = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in parts if p.stl]
+            plate.stl_folder = build3mf.common_folder([p for p in below if not os.path.isabs(p)])
             for p in parts:
                 part = plate.parts.add()
                 part.name = p.name
                 if p.stl:
-                    part.path = build3mf.strip_folder(build3mf.strip_folder(rel[p.stl], project.stl_folder),
-                                                      plate.stl_folder)
+                    part.path = props.part_relative(scene, project, plate, p.stl)
                 else:
-                    part.path = p.source.replace("\\", "/")
+                    part.path = _source_path(scene, project, plate, p.source, os.path.dirname(path))
                     problems.append("%s: %s not found below the STL root, %s" % (p.name, p.source, p.note))
                 part.up = p.up
                 part.angle = p.angle
@@ -302,6 +301,16 @@ class ORCA_OT_import_project(bpy.types.Operator):
                     "Imported %d plates, %d parts%s" % (len(plates), count,
                                                          "; check the Info panel" if problems else ""))
         return {'FINISHED'}
+
+
+def _source_path(scene, project, plate, source, project_dir):
+    """A part whose STL was not found keeps the path Orca stored, saved from its plate's folder like any other part
+    when it is a path on this system (a relative one starts at the 3MF file's folder, as in Orca)."""
+    if not source:
+        return ""
+    if os.path.isabs(source) or not paths.is_absolute(source):
+        return props.part_relative(scene, project, plate, os.path.normpath(os.path.join(project_dir, source)))
+    return source.replace("\\", "/")  # a path from the other system (C:\\... on Linux): kept as Orca stored it
 
 
 def project_spec(context, project, painted):
@@ -330,18 +339,30 @@ def project_spec(context, project, painted):
                                                                   problem))
                 else:
                     seam = _seam_function(line, settings, painted, who)
-            parts.append(build3mf.PartSpec(part.label(), props.part_path(scene, project, plate, part), part.up,
-                                           part.angle, part.copies, seam, mirror=part.mirror))
+            stl = props.part_path(scene, project, plate, part)
+            parts.append(build3mf.PartSpec(part.label(), stl, part.up, part.angle, part.copies, seam,
+                                           mirror=part.mirror, source=_source_file(scene, project, stl)))
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
     template = props.absolute(project.template)
-    return build3mf.ProjectSpec(props.project_path(scene, project), plates, template), problems
+    roots = props.roots(scene)
+    return build3mf.ProjectSpec(props.project_path(scene, project), plates, template,
+                                shown=lambda p: paths.shown(p, *roots)), problems
+
+
+def _source_file(scene, project, stl):
+    """The STL path written into the 3MF: from the 3MF's folder when the STL is below the STL root (Orca reads a
+    relative source_file from there), else the full path."""
+    if paths.relative_to(stl, props.stl_root(scene)) == stl:
+        return stl
+    return paths.relative_form(stl, os.path.dirname(props.project_path(scene, project)))
 
 
 def _seam_function(line, settings, painted, who):
-    painter = seams.SeamPainter([line], width=settings.seam_width, snap=settings.snap_distance, min_share=0.0)
+    width, snap = settings.seam_width, settings.snap_distance  # now: the build may paint later, in steps
+    painter = seams.SeamPainter([line], width=width, snap=snap, min_share=0.0)
 
     def paint(path, mesh):
-        key = (os.path.normcase(path), who, line.name, settings.seam_width, settings.snap_distance)
+        key = (os.path.normcase(path), who, line.name, width, snap)
         if key not in painted:
             result = painter.paint(mesh.verts, mesh.tris, label=path)
             painted[key] = (({}, "seam line %s is not on this part (further than the snap distance)" % line.name)
@@ -378,43 +399,163 @@ class ORCA_OT_build(bpy.types.Operator):
                     "gap, seams painted. An existing file keeps its printer settings and each part's own settings")
         return "Build every ticked project"
 
-    def execute(self, context):
+    def _projects(self, context):
         settings = context.scene.orca_reload
         if self.index >= 0:
-            projects = [settings.projects[self.index]] if self.index < len(settings.projects) else []
-        else:
-            projects = [p for p in settings.projects if p.use]
+            return [settings.projects[self.index]] if self.index < len(settings.projects) else []
+        return [p for p in settings.projects if p.use]
+
+    def execute(self, context):
+        """Builds at once (from a script, or with no window to show the progress in)."""
+        projects = self._projects(context)
         if not projects:
             self.report({'ERROR'}, "No project to build")
             return {'CANCELLED'}
-        stl_cache, painted = {}, {}
-        lines, written = [], 0
-        by_path = {}
-        for project in projects:
-            key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
-            by_path.setdefault(key, []).append(project)
-        for project in projects:
-            key = os.path.normcase(os.path.abspath(props.project_path(context.scene, project)))
-            if len(by_path[key]) > 1:
-                others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
-                lines += ["%s" % props.project_path(context.scene, project),
-                          "  problem: same 3MF file as %s" % others, "  not written", ""]
+        for _ in _build_steps(self, context, projects):
+            pass
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        """Builds one part per step, with a progress bar at the end of the row; the row's Build button turns into
+        a Cancel button."""
+        projects = self._projects(context)
+        if not projects:
+            self.report({'ERROR'}, "No project to build")
+            return {'CANCELLED'}
+        wm = context.window_manager
+        if context.window is None:  # no window to show the progress in
+            return self.execute(context)
+        if props.building() != props.BUILD_IDLE:
+            self.report({'WARNING'}, "A build is running")
+            return {'CANCELLED'}
+        self._steps = _build_steps(self, context, projects)
+        props.set_building(self.index if self.index >= 0 else props.BUILD_ALL)
+        wm.orca_reload_progress = 0.0
+        wm.orca_reload_status = "Starting... (0.0s)"
+        self._start = time.monotonic()
+        self._timer = wm.event_timer_add(0.01, window=context.window)
+        wm.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        try:
+            return self._step(context, event)
+        except Exception:  # never leave the Build buttons greyed out
+            self._steps.close()
+            self._finish(context)
+            raise
+
+    def _step(self, context, event):
+        wm = context.window_manager
+        if props.cancel_requested():
+            self._steps.close()  # writes the log of what was built so far
+            self._finish(context)
+            self.report({'WARNING'}, "Build cancelled")
+            return {'CANCELLED'}
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+        try:
+            done, total, status = next(self._steps)
+        except StopIteration:
+            self._finish(context)
+            return {'FINISHED'}
+        wm.orca_reload_progress = done / max(1, total)
+        wm.orca_reload_status = "%s | %.1fs" % (status, time.monotonic() - self._start)
+        _redraw(context)
+        return {'PASS_THROUGH'}
+
+    def _finish(self, context):
+        wm = context.window_manager
+        wm.event_timer_remove(self._timer)
+        props.set_building(props.BUILD_IDLE)
+        wm.orca_reload_progress = 0.0
+        wm.orca_reload_status = ""
+        _redraw(context)
+
+
+def _redraw(context):
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+def _build_steps(operator, context, projects):
+    """Builds the projects, one part per step: yields (steps done, steps in all, what comes next: Part 3/12, or
+    3MF 1/2 for writing a project). Everything is
+    taken from the scene before the first step, so editing the tab while it builds does not change the build.
+    Each project then reads its parts' STLs and paints their seams one per step, and writes its 3MF in a step of
+    its own. Stopped early (closed), it still writes the log of what it built."""
+    scene = context.scene
+    stl_cache, painted = {}, {}
+    by_path = {}
+    for project in projects:
+        key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
+        by_path.setdefault(key, []).append(project)
+    jobs = []  # (name, ProjectSpec or None, report lines when it cannot be built)
+    for project in projects:
+        where = project.name
+        key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
+        if len(by_path[key]) > 1:
+            others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
+            jobs.append((where, None, [props.shown(scene, props.project_path(scene, project)),
+                                       "  problem: same 3MF file as %s" % others, "  not written"]))
+            continue
+        spec, problems = project_spec(context, project, painted)
+        if problems:
+            jobs.append((where, None, [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] +
+                         ["  not written"]))
+        else:
+            jobs.append((where, spec, []))
+    total = sum(sum(len(plate.parts) for plate in spec.plates) + 1 for _, spec, _ in jobs if spec)
+    part_total = sum(len(plate.parts) for _, spec, _ in jobs if spec for plate in spec.plates)
+    project_total = sum(1 for _, spec, _ in jobs if spec)
+    lines, written, done, stopped = [], 0, 0, True
+    part_no = project_no = 0
+    try:
+        for where, spec, problem_lines in jobs:
+            if spec is None:
+                lines += problem_lines + [""]
                 continue
-            spec, problems = project_spec(context, project, painted)
-            if problems:
-                lines += ["%s" % spec.path] + ["  problem: %s" % p for p in problems] + ["  not written", ""]
-                continue
+            for plate in spec.plates:
+                for part in plate.parts:
+                    part_no += 1
+                    yield done, total, "Part %d/%d" % (part_no, part_total)
+                    try:  # read and paint now, so the build below finds them ready; it reports any problem
+                        mesh, _ = build3mf._load(part, stl_cache)
+                        if part.seam:
+                            part.seam(part.stl, mesh)
+                    except (reload3mf.ReloadError, OSError, ValueError):
+                        pass
+                    done += 1
+            project_no += 1
+            yield done, total, "3MF %d/%d" % (project_no, project_total)
             try:
                 text, ok = build3mf.build(spec, stl_cache)
             except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError, ValueError) as e:
-                text, ok = ["%s" % spec.path, "  problem: %s" % e, "  not written"], False
+                text, ok = [spec.shown(spec.path), "  problem: %s" % e, "  not written"], False
             lines += text + [""]
             written += ok
+            done += 1
+        stopped = False
+    finally:
+        if stopped:
+            lines.append("Stopped: %d of %d projects written" % (written, len(projects)))
         _show_log(context, lines)
         failed = len(projects) - written
-        self.report({'WARNING'} if failed else {'INFO'},
-                    "%d of %d projects written%s" % (written, len(projects),
-                                                     "; see the Info panel" if failed else ""))
+        operator.report({'WARNING'} if failed else {'INFO'},
+                        "%d of %d projects written%s" % (written, len(projects),
+                                                         "; see the Info panel" if failed else ""))
+
+
+class ORCA_OT_cancel_build(bpy.types.Operator):
+    bl_idname = "orca_reload.cancel_build"
+    bl_label = "Cancel Build"
+    bl_description = "Stop the build. The projects written so far are kept"
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        props.request_cancel()
         return {'FINISHED'}
 
 
@@ -430,4 +571,4 @@ class ORCA_OT_clear_log(bpy.types.Operator):
 
 
 classes = (ORCA_OT_list_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_browse_root, ORCA_OT_browse_template,
-           ORCA_OT_import_project, ORCA_OT_build, ORCA_OT_clear_log)
+           ORCA_OT_import_project, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)

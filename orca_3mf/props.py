@@ -152,6 +152,22 @@ def part_path(scene, project, plate, part):
     return paths.join(plate_folder(scene, project, plate), part.path)
 
 
+def part_relative(scene, project, plate, path):
+    """A part's STL as it is saved: from its plate's folder (../shared/box.stl when outside it), or absolute when there
+    is no way there from that folder (the .blend is not saved and the STL root is relative, or another drive)."""
+    return paths.relative_form(path, plate_folder(scene, project, plate))
+
+
+def roots(scene):
+    """(3MF root, STL root, .blend file's folder), as paths.shown takes them."""
+    return project_root(scene), stl_root(scene), os.path.dirname(bpy.data.filepath)
+
+
+def shown(scene, path):
+    """A path as the tab shows it (paths.shown)."""
+    return paths.shown(path, *roots(scene))
+
+
 def project_root(scene):
     """The 3MF root; empty is the .blend file's folder."""
     return absolute(scene.orca_reload.project_root or "//")
@@ -200,16 +216,42 @@ def from_dict(item, data):
 classes = (OrcaPart, OrcaPlate, OrcaProject, OrcaLogLine, OrcaSettings)
 
 
+BUILD_IDLE, BUILD_ALL = -2, -1  # building(): no build, Build all, else the project's index
+_building = {"which": BUILD_IDLE, "cancel": False}  # here, not in the .blend: a restart starts with no build
+
+
+def building():
+    """Which build runs now: BUILD_IDLE, BUILD_ALL or the index of the project."""
+    return _building["which"]
+
+
+def set_building(which):
+    _building.update(which=which, cancel=False)
+
+
+def request_cancel():
+    _building["cancel"] = True
+
+
+def cancel_requested():
+    return _building["cancel"]
+
+
 def register_properties():
     bpy.types.Scene.orca_reload = bpy.props.PointerProperty(type=OrcaSettings)
     wm = bpy.types.WindowManager
     wm.orca_reload_log = bpy.props.CollectionProperty(type=OrcaLogLine)
     wm.orca_reload_log_index = bpy.props.IntProperty()
     wm.orca_reload_tips = bpy.props.BoolProperty(name="Guide", default=False)
+    # How far the build in progress is, and what it does now
+    wm.orca_reload_progress = bpy.props.FloatProperty(name="Progress", default=0.0, min=0.0, max=1.0)
+    wm.orca_reload_status = bpy.props.StringProperty(default="")
 
 
 def unregister_properties():
     wm = bpy.types.WindowManager
+    del wm.orca_reload_status
+    del wm.orca_reload_progress
     del wm.orca_reload_tips
     del wm.orca_reload_log_index
     del wm.orca_reload_log

@@ -68,12 +68,14 @@ CUSTOM_GCODE_FILE = "Metadata/custom_gcode_per_layer.xml"
 
 class PartSpec:
     """One part: the STL file (absolute path), the direction of the part that points up on the plate, the turn
-    around it (radians), how many copies, a mirror across the part's own X axis, and an optional seam function
-    (stl_path, Mesh) -> None or (paint_seam strings by triangle index, note for the report)."""
+    around it (radians), how many copies, a mirror across the part's own X axis, an optional seam function
+    (stl_path, Mesh) -> None or (paint_seam strings by triangle index, note for the report), and the STL path written
+    into the project as its source_file (default: the absolute path; relative paths start at the 3MF's folder)."""
 
-    def __init__(self, name, stl, up=(0.0, 0.0, 1.0), angle=0.0, copies=1, seam=None, mirror=False):
+    def __init__(self, name, stl, up=(0.0, 0.0, 1.0), angle=0.0, copies=1, seam=None, mirror=False, source=None):
         self.name = name or os.path.basename(stl)
         self.stl = stl
+        self.source = source or stl
         self.up = tuple(up)
         self.angle = angle
         self.copies = max(int(copies), 1)
@@ -90,10 +92,11 @@ class PlateSpec:
 
 class ProjectSpec:
     """A project: the 3MF file to write (absolute path), its plates, a template project for the settings of a new
-    project, and the bed size used when no settings come with it."""
+    project, the bed size used when no settings come with it, and how the report shows a path (default: as it is)."""
 
-    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0)):
+    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None):
         self.path = path
+        self.shown = shown or (lambda p: p)
         self.plates = list(plates)
         self.template = template
         self.bed = tuple(bed)
@@ -221,7 +224,8 @@ class Base:
             score = 0
             old_mesh = None
             if o.part is not None:
-                if o.part.source and _same_source(o.part.source, spec.stl):
+                if o.part.source and (_same_source(o.part.source, spec.source) or
+                                      _same_source(o.part.source, spec.stl)):
                     score += 4
                 try:
                     old_mesh = self.project.old_mesh(o.part)
@@ -634,7 +638,7 @@ def _model_settings(spec, base, objects):
         out.append('    <part id="%d" subtype="normal_part">\n' % obj.sub_id)
         out.append(_meta_line("      ", "name", obj.spec.name))
         out.append(_meta_line("      ", "matrix", "1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"))
-        out.append(_meta_line("      ", "source_file", obj.spec.stl))
+        out.append(_meta_line("      ", "source_file", obj.spec.source))
         out.append(_meta_line("      ", "source_object_id", "0"))
         out.append(_meta_line("      ", "source_volume_id", "0"))
         for axis, value in zip("xyz", obj.offset):
@@ -694,10 +698,10 @@ def build(spec, stl_cache=None, dry_run=False):
     base = Base(spec.path, spec.template)
     try:
         objects, problems, bed = plan(spec, base, stl_cache)
-        lines = ["%s (%s)" % (spec.path, "new" if created else "rebuilt")]
+        lines = ["%s (%s)" % (spec.shown(spec.path), "new" if created else "rebuilt")]
         if base.settings_from:
             source = "the project" if os.path.normcase(os.path.abspath(base.settings_from)) == \
-                os.path.normcase(os.path.abspath(spec.path)) else base.settings_from
+                os.path.normcase(os.path.abspath(spec.path)) else spec.shown(base.settings_from)
             lines.append("  settings from %s, bed %g x %g mm" % (source, bed[2], bed[3]))
         else:
             problems.append("no printer settings: set Settings from to an Orca project made for your printer "

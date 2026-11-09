@@ -283,6 +283,136 @@ class OrcaTabTest(unittest.TestCase):
         report = self.build(settings.project_index)
         self.assertIn("(rebuilt)", report)
 
+    def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
+        from bl_ext.orca_test.orca_3mf import props
+        scene = bpy.context.scene
+        settings = scene.orca_reload
+        project = self.add_project()
+        part = self.add_part()
+        outside = os.path.join(self.dir, "elsewhere", "lid.stl")
+        fixtures.write_stl(outside, fixtures.box((10, 10, 10), center=(30, -40, 5)))
+        part.path = outside
+        self.build()
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        settings.stl_root = "../stl"
+        # Found, but outside the STL root: saved from the plate's folder, not as a full path
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        imported = settings.projects[settings.project_index]
+        plate = imported.plates[0]
+        self.assertEqual(plate.parts[0].path, "../elsewhere/lid.stl")
+        self.assertEqual(props.part_path(scene, imported, plate, plate.parts[0]), outside)
+        # A 3MF outside the 3MF root: its folder is saved from the root too
+        moved = os.path.join(self.dir, "other", "GripV_parts.3mf")
+        os.makedirs(os.path.dirname(moved))
+        shutil.copy(self.out(), moved)
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=moved), {'FINISHED'})
+        imported = settings.projects[settings.project_index]
+        self.assertEqual(imported.folder, "../other")
+        self.assertEqual(props.project_path(scene, imported), moved)
+        # Not found: Orca's stored path, saved the same way
+        os.rename(outside, outside + ".moved")
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        imported = settings.projects[settings.project_index]
+        self.assertEqual(imported.plates[0].parts[0].path, "../elsewhere/lid.stl")
+
+    def source_files(self):
+        with zipfile.ZipFile(self.out()) as z:
+            return re.findall(r'key="source_file" value="([^"]*)"', z.read("Metadata/model_settings.config").decode())
+
+    def test_paths_in_the_3mf_and_the_tab_start_at_the_roots(self):
+        from bl_ext.orca_test.orca_3mf import props
+        scene = bpy.context.scene
+        project = self.add_project()
+        self.add_part()
+        outside = os.path.join(self.dir, "elsewhere", "lid.stl")
+        fixtures.write_stl(outside, fixtures.box((10, 10, 10)))
+        self.add_part(outside)
+        os.makedirs(os.path.join(self.dir, "blender"))
+        bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
+        self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
+        scene = bpy.context.scene
+        scene.orca_reload.stl_root = "../stl"
+        report = self.build()
+        # Below the STL root: from the 3MF's folder. Outside it: the full path
+        self.assertEqual(self.source_files(), ["../../stl/GripV/parts/box.stl", outside])
+        # Shown from the .blend file's folder, the full path only outside the roots
+        self.assertIn("../orca/GripV/GripV_parts.3mf (new)", report)
+        self.assertNotIn(self.out(), report)
+        self.assertEqual(props.shown(scene, self.out()), "../orca/GripV/GripV_parts.3mf")
+        self.assertEqual(props.shown(scene, self.stl), "../stl/GripV/parts/box.stl")
+        self.assertEqual(props.shown(scene, outside), outside)
+        # The relative source_file still finds the STL when the project is imported and rebuilt
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        imported = scene.orca_reload.projects[scene.orca_reload.project_index]
+        self.assertEqual(props.part_path(scene, imported, imported.plates[0], imported.plates[0].parts[0]), self.stl)
+        self.assertIn("(rebuilt)", self.build(scene.orca_reload.project_index))
+
+    def test_build_steps_report_progress_part_by_part(self):
+        from bl_ext.orca_test.orca_3mf import operators
+        settings = bpy.context.scene.orca_reload
+        self.add_project(plates=2)
+        self.add_part()
+        self.add_part(copies=3)
+        list_action('PROJECT', 'COPY')
+        list_action('PROJECT', 'PASTE')
+        settings.projects[1].name = "second"
+
+        class Reports:
+            def report(self, kind, text):
+                self.last = (kind, text)
+
+        reports = Reports()
+        steps = list(operators._build_steps(reports, bpy.context, list(settings.projects)))
+        self.assertEqual([s[1] for s in steps], [6] * len(steps))  # 2 parts + writing, for each project
+        done = [s[0] for s in steps]
+        self.assertEqual(done, sorted(done))
+        self.assertLess(done[-1], 6)
+        self.assertEqual([s[2] for s in steps], ["Part 1/4", "Part 2/4", "3MF 1/2", "Part 3/4", "Part 4/4",
+                                                 "3MF 2/2"])
+        self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
+        # Stopped half way: the log says so, and what was built is kept
+        steps = operators._build_steps(reports, bpy.context, list(settings.projects))
+        for step in steps:
+            if step[2] == "Part 3/4":
+                break
+        steps.close()
+        log = bpy.data.texts["Orca build report"].as_string()
+        self.assertIn("Stopped: 1 of 2 projects written", log)
+        # The modal: steps on timer ticks and passes every event on, as Blender's events come (they carry no
+        # timer of their own); the Cancel button stops it
+        import types
+        from bl_ext.orca_test.orca_3mf import props
+        self.addCleanup(props.set_building, props.BUILD_IDLE)
+        Build = operators.ORCA_OT_build
+        tick = types.SimpleNamespace(type='TIMER', value='NOTHING')
+        mouse = types.SimpleNamespace(type='MOUSEMOVE', value='NOTHING')
+        for cancel in (False, True):
+            op = types.SimpleNamespace(_steps=operators._build_steps(reports, bpy.context, list(settings.projects)),
+                                       _start=0.0, finished=False, report=reports.report)
+            op._finish = lambda context, op=op: (setattr(op, "finished", True), props.set_building(props.BUILD_IDLE))
+            op._step = types.MethodType(Build._step, op)
+            props.set_building(props.BUILD_ALL)
+            self.assertEqual(Build.modal(op, bpy.context, mouse), {'PASS_THROUGH'})
+            results = []
+            while not op.finished:
+                results.append(Build.modal(op, bpy.context, tick))
+                if cancel and len(results) == 2:
+                    self.assertEqual(bpy.ops.orca_reload.cancel_build(), {'FINISHED'})
+            if cancel:
+                self.assertEqual(results, [{'PASS_THROUGH'}] * 2 + [{'CANCELLED'}])
+                self.assertEqual(reports.last, ({'WARNING'}, "Build cancelled"))
+                self.assertIn("Stopped: 0 of 2 projects written", bpy.data.texts["Orca build report"].as_string())
+            else:
+                self.assertEqual(results, [{'PASS_THROUGH'}] * 6 + [{'FINISHED'}])
+                self.assertEqual(reports.last, ({'INFO'}, "2 of 2 projects written"))
+                self.assertTrue(bpy.context.window_manager.orca_reload_status.startswith("3MF 2/2 | "))
+            self.assertEqual(props.building(), props.BUILD_IDLE)
+        # With no window (a script, or Blender in the background) the button builds at once
+        self.assertEqual(bpy.ops.orca_reload.build('INVOKE_DEFAULT', index=0), {'FINISHED'})
+        self.assertEqual(props.building(), props.BUILD_IDLE)
+
     def test_stl_root_falls_back_to_combi_export(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene
@@ -424,13 +554,24 @@ class OrcaTabTest(unittest.TestCase):
                 (ui.ORCA_UL_log, context.window_manager, context.window_manager.orca_reload_log[0])]
         for cls, data, item in rows:
             cls.draw_item(None, context, Layout(), data, item, 0, None, "", 0)
+        # While a build runs, its progress bar takes the place of the project row or of the 3MF root
+        wm = context.window_manager
+        from bl_ext.orca_test.orca_3mf import props
+        self.addCleanup(props.set_building, props.BUILD_IDLE)
+        for building in (0, -1):
+            props.set_building(building)
+            wm.orca_reload_status = "Part 1/2 | 0.4s"
+            layout = Layout()
+            ui.ORCA_UL_projects.draw_item(None, context, layout, context.scene.orca_reload, project, 0, None, "", 0)
+            panel = type("P", (), {"layout": Layout()})()
+            ui.VIEW3D_PT_orca_reload.draw(panel, context)
 
     def test_panels_and_operators_are_registered(self):
         for name in ("VIEW3D_PT_orca_reload", "VIEW3D_PT_orca_reload_info", "VIEW3D_PT_orca_reload_projects",
                      "VIEW3D_PT_orca_reload_plates", "VIEW3D_PT_orca_reload_parts"):
             self.assertTrue(hasattr(bpy.types, name), name)
         for op in ("list_action", "add_parts", "browse_part", "browse_root", "browse_template", "import_project",
-                   "build", "clear_log"):
+                   "build", "cancel_build", "clear_log"):
             self.assertTrue(hasattr(bpy.ops.orca_reload, op), op)
 
 
