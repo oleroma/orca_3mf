@@ -36,6 +36,15 @@ class OrcaPart(bpy.types.PropertyGroup):
         name="Mirror", default=False,
         description="Mirror the part across its own X axis before standing it up: a part mirrored in Orca "
                     "imports as its original shape with this ticked, and builds back mirrored")
+    assembly: bpy.props.StringProperty(
+        name="Assembly",
+        description="Name of the Orca object this part is assembled into: the parts of a plate with the same "
+                    "assembly are one object with several parts, kept together where Place puts them. "
+                    "Empty: an object of its own")
+    place: bpy.props.FloatVectorProperty(
+        name="Place", size=3, subtype='TRANSLATION', unit='LENGTH', default=(0.0, 0.0, 0.0),
+        description="Where the middle of the part sits in its assembly once it stands as Up, Turn and Mirror "
+                    "say (mm on the plate). Only used with an Assembly")
     seam: bpy.props.PointerProperty(
         name="Seam", type=bpy.types.Object, poll=_seam_poll,
         description="Curve or mesh that marks this part's seam: a curve's splines, the edges of a mesh made of edges "

@@ -70,9 +70,14 @@ class PartSpec:
     """One part: the STL file (absolute path), the direction of the part that points up on the plate, the turn
     around it (radians), how many copies, a mirror across the part's own X axis, an optional seam function
     (stl_path, Mesh) -> None or (paint_seam strings by triangle index, note for the report), and the STL path written
-    into the project as its source_file (default: the absolute path; relative paths start at the 3MF's folder)."""
+    into the project as its source_file (default: the absolute path; relative paths start at the 3MF's folder).
 
-    def __init__(self, name, stl, up=(0.0, 0.0, 1.0), angle=0.0, copies=1, seam=None, mirror=False, source=None):
+    assembly: the name of the Orca object the part is assembled into (parts of a plate with the same assembly are one
+    object with several parts, nested together); empty for an object of its own. place: where the middle of the
+    part's bounding box sits in its assembly, in mm, once it is stood up (only for a part of an assembly)."""
+
+    def __init__(self, name, stl, up=(0.0, 0.0, 1.0), angle=0.0, copies=1, seam=None, mirror=False, source=None,
+                 assembly="", place=(0.0, 0.0, 0.0)):
         self.name = name or os.path.basename(stl)
         self.stl = stl
         self.source = source or stl
@@ -81,6 +86,19 @@ class PartSpec:
         self.copies = max(int(copies), 1)
         self.seam = seam
         self.mirror = bool(mirror)
+        self.assembly = assembly or ""
+        self.place = tuple(place)
+
+
+class AssemblySpec:
+    """The parts of a plate assembled into one Orca object: its name, its parts (PartSpec) and how many copies."""
+
+    def __init__(self, name, parts):
+        self.name = name
+        self.parts = list(parts)
+        self.copies = max(p.copies for p in self.parts)
+        self.stl = ""
+        self.seam = None
 
 
 class PlateSpec:
@@ -107,11 +125,13 @@ class ProjectSpec:
 
 
 class _OldObject:
-    def __init__(self, oid, name, meta, part, plates=(), extras=(), index=0):
+    def __init__(self, oid, name, meta, part, plates=(), extras=(), index=0, models=(), rotation=None):
         self.id = oid
         self.name = name
         self.meta = meta  # object settings, [(key, value)] without the name
         self.part = part  # reload3mf.Part of its one model part, or None
+        self.models = list(models)  # reload3mf.Parts of all its model parts (several for an assembly)
+        self.rotation = rotation or layout.IDENTITY  # rotation of its first copy on the bed
         self.plates = frozenset(plates)  # plate names it sits on
         self.extras = list(extras)  # reload3mf.Parts of its extra volumes (modifiers, negatives, blockers, ...)
         self.index = index  # 1-based position in the old model
@@ -202,8 +222,14 @@ class Base:
             extras = [p for p in obj.parts if not p.is_model_part] if obj else []
             name = obj.name if obj else o.get("id")
             on = (plate_names[i] for i in getattr(obj, "plates", ()) if i in plate_names) if obj else ()
+            rotation = None
+            if obj and obj.items:
+                try:
+                    rotation = reload3mf.parse_transform(project.items[obj.items[0]][1])[0]
+                except ReloadError:
+                    rotation = None
             self.objects.append(_OldObject(o.get("id"), name, meta, part, on, extras,
-                                           model_order.get(o.get("id"), 0)))
+                                           model_order.get(o.get("id"), 0), models, rotation))
 
     def take_plate(self, name, position):
         """The old plate settings for `name` (once each), else by position (as before), else a fresh plate."""
@@ -216,25 +242,29 @@ class Base:
             return self.plates[position][1]
         return [("locked", "false")]
 
+    def _part_score(self, part, spec, new_mesh):
+        """How well an old model part matches a new part: 8 for the same shape, 4 for the same source file."""
+        score = 0
+        if part.source and (_same_source(part.source, spec.source) or _same_source(part.source, spec.stl)):
+            score += 4
+        try:
+            old_mesh = self.project.old_mesh(part)
+        except ReloadError:
+            old_mesh = None
+        if old_mesh is not None:
+            shift = tuple(a - b for a, b in zip(old_mesh.center(), new_mesh.center()))
+            if reload3mf.same_shape(old_mesh, new_mesh, (0.0, 0.0, 0.0), shift):
+                score += 8
+        return score
+
     def take_part(self, spec, plate_name, new_mesh):
-        """The old object that best matches the part: by shape, then source file, then plate, then name."""
-        center = new_mesh.center()
+        """The old object that best matches the part: by shape, then source file, then plate, then name.
+        Assemblies (objects of several parts) are left for take_assembly."""
         best, best_score = None, -1
         for o in self.objects:
-            score = 0
-            old_mesh = None
-            if o.part is not None:
-                if o.part.source and (_same_source(o.part.source, spec.source) or
-                                      _same_source(o.part.source, spec.stl)):
-                    score += 4
-                try:
-                    old_mesh = self.project.old_mesh(o.part)
-                except ReloadError:
-                    old_mesh = None
-            if old_mesh is not None:
-                shift = tuple(a - b for a, b in zip(old_mesh.center(), center))
-                if reload3mf.same_shape(old_mesh, new_mesh, (0.0, 0.0, 0.0), shift):
-                    score += 8
+            if len(o.models) > 1:
+                continue
+            score = self._part_score(o.part, spec, new_mesh) if o.part is not None else 0
             if plate_name and o.plates and plate_name in o.plates:
                 score += 2
             if o.name == spec.name:
@@ -245,6 +275,37 @@ class Base:
             return None
         self.objects.remove(best)
         return best
+
+    def take_assembly(self, name, plate_name, parts):
+        """The old assembly that best matches the new one (parts: [(PartSpec, Mesh)]): by the parts it shares
+        (source file), then plate, then name. Returns (old object or None, {part index: old model part})."""
+        best, best_score = None, -1
+        for o in self.objects:
+            if len(o.models) < 2:
+                continue
+            sources = sum(1 for spec, _ in parts for m in o.models
+                          if m.source and (_same_source(m.source, spec.source) or _same_source(m.source, spec.stl)))
+            score = 4 * min(sources, len(parts))
+            if plate_name and o.plates and plate_name in o.plates:
+                score += 2
+            if o.name == name:
+                score += 1
+            if score > best_score:
+                best, best_score = o, score
+        if best is None or best_score <= 0:
+            return None, {}
+        self.objects.remove(best)
+        taken, free = {}, list(best.models)
+        for i, (spec, mesh) in enumerate(parts):
+            scored = [(self._part_score(m, spec, mesh) + (1 if m.name == spec.name else 0), -k, m)
+                      for k, m in enumerate(free)]
+            if not scored:
+                break
+            score, _, m = max(scored, key=lambda s: s[:2])
+            if score > 0:
+                taken[i] = m
+                free.remove(m)
+        return best, taken
 
     def settings(self):
         if SETTINGS not in self.files:
@@ -294,23 +355,38 @@ class Base:
 # Building
 
 
-class _Object:
-    """One object of the written project: a part's mesh and its copies."""
+class _Volume:
+    """One model part of a written object: its STL's mesh and where it sits in the object."""
 
-    def __init__(self, spec, plate_no):
+    def __init__(self, spec):
         self.spec = spec
-        self.plate_no = plate_no
         self.mesh = None  # stored mesh, centred on its bounding box like Orca stores it
         self.offset = None  # STL coordinates of the stored mesh's origin
         self.extras = {}  # per-triangle painting
+        self.old_part = None  # reload3mf.Part it was matched to, or None
+        self.transform = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), (0.0, 0.0, 0.0)  # in the object
+        self.sub_id = None  # its sub-model <object id>
+        self.path = None  # its sub-model file
+
+
+class _Object:
+    """One object of the written project: a part's mesh (or an assembly's parts) and its copies."""
+
+    def __init__(self, spec, plate_no):
+        self.spec = spec  # PartSpec, or AssemblySpec for an assembly
+        self.plate_no = plate_no
+        self.volumes = []  # _Volume of each model part
         self.old = None
         self.rotation = None
         self.lo = self.hi = None
         self.transforms = []  # (rows, translation) of each copy
         self.notes = []
         self.id = None  # the object's <object id> in the root model
-        self.sub_id = None  # the main volume's sub-model <object id>
         self.extra_volumes = []  # _ExtraVolume list (modifiers, negatives, blockers carried over)
+
+    @property
+    def assembly(self):
+        return isinstance(self.spec, AssemblySpec)
 
 
 class _ExtraVolume:
@@ -358,20 +434,13 @@ def _carry_extras(base, old_obj, anchor):
     return out
 
 
-def _prepare(obj, base, stl_cache, plate_name):
-    spec = obj.spec
-    stl, _ = _load(spec, stl_cache)  # degenerate triangles are dropped, as Orca's own import does
+def _volume(spec, stl, old_part, base, notes):
+    """The volume of a part: its stored mesh (the old one with its painting when the shape did not change) and its
+    seam painting. notes gets what changed."""
+    vol = _Volume(spec)
+    vol.old_part = old_part
     seam = spec.seam(spec.stl, stl) if spec.seam else None
-    obj.old = base.take_part(spec, plate_name, stl)
-    obj.extra_volumes = []
-    if obj.old is not None and obj.old.extras and obj.old.part is not None:
-        try:
-            anchor = reload3mf.invert(reload3mf.parse_transform(obj.old.part.transform))
-            obj.extra_volumes = _carry_extras(base, obj.old, anchor)
-        except ReloadError:
-            obj.extra_volumes = []
     center = stl.center()
-    old_part = obj.old.part if obj.old else None
     old = None
     if old_part is not None:
         try:
@@ -381,26 +450,95 @@ def _prepare(obj, base, stl_cache, plate_name):
     if old is not None and reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0),
                                                 tuple(o - s for o, s in zip(old.center(), center))):
         # Same shape, so the same triangles in the same order: keep the stored mesh and its painting.
-        obj.mesh = old
-        obj.extras = {i: dict(a) for i, a in old_part.extras.items()}
-        obj.offset = tuple(c - o for c, o in zip(center, old.center()))
+        vol.mesh = old
+        vol.extras = {i: dict(a) for i, a in old_part.extras.items()}
+        vol.offset = tuple(c - o for c, o in zip(center, old.center()))
     else:
-        obj.mesh = stl.translated(tuple(-c for c in center))
-        obj.offset = center
+        vol.mesh = stl.translated(tuple(-c for c in center))
+        vol.offset = center
         if old_part is not None and old_part.extras:
-            obj.notes.append("painting removed, the shape changed")
+            notes.append("painting removed, the shape changed")
     if seam is not None:
         strings, note = seam
-        for a in obj.extras.values():
+        for a in vol.extras.values():
             a.pop(SEAM_ATTR, None)
         for i, value in strings.items():
-            obj.extras.setdefault(i, {})[SEAM_ATTR] = value
-        obj.notes.append(note)
-    obj.extras = {i: a for i, a in obj.extras.items() if a}
-    obj.rotation = layout.orientation(spec.up, spec.angle)
+            vol.extras.setdefault(i, {})[SEAM_ATTR] = value
+        notes.append(note)
+    vol.extras = {i: a for i, a in vol.extras.items() if a}
+    return vol
+
+
+def _rotation(spec):
+    rotation = layout.orientation(spec.up, spec.angle)
     if spec.mirror:
-        obj.rotation = layout.matmul(obj.rotation, MIRROR)
-    obj.lo, obj.hi = layout.footprint(obj.mesh.verts, obj.rotation)
+        rotation = layout.matmul(rotation, MIRROR)
+    return rotation
+
+
+def _prepare(obj, base, stl_cache, plate_name):
+    if obj.assembly:
+        _prepare_assembly(obj, base, stl_cache, plate_name)
+        return
+    spec = obj.spec
+    stl, _ = _load(spec, stl_cache)  # degenerate triangles are dropped, as Orca's own import does
+    obj.old = base.take_part(spec, plate_name, stl)
+    obj.extra_volumes = []
+    if obj.old is not None and obj.old.extras and obj.old.part is not None:
+        try:
+            anchor = reload3mf.invert(reload3mf.parse_transform(obj.old.part.transform))
+            obj.extra_volumes = _carry_extras(base, obj.old, anchor)
+        except ReloadError:
+            obj.extra_volumes = []
+    obj.volumes = [_volume(spec, stl, obj.old.part if obj.old else None, base, obj.notes)]
+    obj.rotation = _rotation(spec)
+    obj.lo, obj.hi = layout.footprint(obj.volumes[0].mesh.verts, obj.rotation)
+
+
+def _prepare_assembly(obj, base, stl_cache, plate_name):
+    """An assembly: each part stands in the object as its Up, Turn and Mirror say, with the middle of its bounding
+    box at its place; the copies are only moved, not turned."""
+    meshes = []
+    for spec in obj.spec.parts:
+        try:
+            meshes.append(_load(spec, stl_cache)[0])
+        except (ReloadError, OSError, ValueError) as e:
+            raise ReloadError("%s: %s" % (spec.name, e))
+    obj.old, taken = base.take_assembly(obj.spec.name, plate_name, list(zip(obj.spec.parts, meshes)))
+    obj.extra_volumes = []
+    if obj.old is not None and obj.old.extras:
+        # The places came from the old object's parts turned like its first copy (read_layout), so its extra
+        # volumes go where they were with the same turn.
+        obj.extra_volumes = _carry_extras(base, obj.old, (obj.old.rotation, (0.0, 0.0, 0.0)))
+    lo, hi = [math.inf] * 3, [-math.inf] * 3
+    for i, (spec, stl) in enumerate(zip(obj.spec.parts, meshes)):
+        notes = []
+        vol = _volume(spec, stl, taken.get(i), base, notes)
+        obj.notes += ["%s: %s" % (spec.name, n) for n in notes]
+        rows = _rotation(spec)
+        middle = layout.apply(rows, vol.mesh.center())
+        vol.transform = rows, tuple(p - m for p, m in zip(spec.place, middle))
+        obj.volumes.append(vol)
+        vlo, vhi = layout.footprint(vol.mesh.verts, rows)
+        for k in range(3):
+            lo[k] = min(lo[k], vlo[k] + vol.transform[1][k])
+            hi[k] = max(hi[k], vhi[k] + vol.transform[1][k])
+    obj.rotation = layout.IDENTITY
+    obj.lo, obj.hi = tuple(lo), tuple(hi)
+
+
+def _grouped(parts):
+    """A plate's parts with the parts of each assembly gathered into one AssemblySpec, where its first part was."""
+    out, groups = [], {}
+    for part in parts:
+        if not part.assembly:
+            out.append(part)
+        elif part.assembly in groups:
+            groups[part.assembly].append(part)
+        else:
+            groups[part.assembly] = [part]
+            out.append(part.assembly)
+    return [AssemblySpec(p, groups[p]) if isinstance(p, str) else p for p in out]
 
 
 def plan(spec, base, stl_cache=None):
@@ -416,7 +554,7 @@ def plan(spec, base, stl_cache=None):
     grid = (int(width), int(depth))
     for plate_no, plate in enumerate(spec.plates):
         plate_objects = []
-        for part in plate.parts:
+        for part in _grouped(plate.parts):
             obj = _Object(part, plate_no)
             try:
                 _prepare(obj, base, stl_cache, plate.name)
@@ -537,20 +675,24 @@ def write(spec, base, objects, out_path):
     sub_paths = []
     next_id = 1
     for n, obj in enumerate(objects, 1):
-        obj.sub_id = next_id
-        next_id += 1
+        comps = []
+        for k, vol in enumerate(obj.volumes):
+            vol.sub_id = next_id
+            next_id += 1
+            vol.path = _file_name(obj.spec.name if k == 0 and not obj.assembly
+                                  else "%s_%d_%s" % (obj.spec.name, k + 1, vol.spec.name), n)
+            sub_paths.append(vol.path)
+            sub = [_model_head(), ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n',
+                   '  <object id="%d" p:UUID="%08x-81cb-4c03-9d28-80fed5dfa1dc" type="model">\n'
+                   % (vol.sub_id, vol.sub_id),
+                   "   ", reload3mf.mesh_xml(vol.mesh, "   ", vol.extras), "\n  </object>\n </resources>\n"
+                   " <build/>\n</model>\n"]
+            files[vol.path] = "".join(sub)
+            comps.append('    <component p:path="/%s" objectid="%d" '
+                         'p:UUID="%08x-b206-40ff-9872-83e8017abed1" transform="%s"/>\n'
+                         % (escape(vol.path), vol.sub_id, vol.sub_id, _transform_text(vol.transform)))
         obj.id = next_id
         next_id += 1
-        main_path = _file_name(obj.spec.name, n)
-        sub_paths.append(main_path)
-        sub = [_model_head(), ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n',
-               '  <object id="%d" p:UUID="%08x-81cb-4c03-9d28-80fed5dfa1dc" type="model">\n' % (obj.sub_id, obj.sub_id),
-               "   ", reload3mf.mesh_xml(obj.mesh, "   ", obj.extras), "\n  </object>\n </resources>\n"
-               " <build/>\n</model>\n"]
-        files[main_path] = "".join(sub)
-        comps = ['    <component p:path="/%s" objectid="%d" '
-                 'p:UUID="%08x-b206-40ff-9872-83e8017abed1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
-                 % (escape(main_path), obj.sub_id, obj.sub_id)]
         for k, extra in enumerate(obj.extra_volumes):
             extra.sub_id = next_id
             next_id += 1
@@ -625,27 +767,35 @@ def write(spec, base, objects, out_path):
             os.remove(tmp)
 
 
+def _matrix_text(transform):
+    """A part's place in its object as Orca's "matrix" setting: the 4 x 4 matrix, row by row."""
+    rows, t = transform
+    values = [v for r in range(3) for v in (rows[r][0], rows[r][1], rows[r][2], t[r])] + [0.0, 0.0, 0.0, 1.0]
+    return " ".join("%.9g" % (0.0 if abs(v) < 1e-12 else v) for v in values)
+
+
 def _model_settings(spec, base, objects):
     out = ['<?xml version="1.0" encoding="UTF-8"?>\n<config>\n']
     for obj in objects:
         meta = obj.old.meta if obj.old else [("extruder", "1")]
-        part_meta = []
-        if obj.old and obj.old.part:
-            part_meta = [(k, v) for k, v in obj.old.part.meta.items() if k not in PART_KEYS]
         out.append('  <object id="%d">\n' % obj.id)
         out.append(_meta_line("    ", "name", obj.spec.name))
         out += [_meta_line("    ", k, v) for k, v in meta]
-        out.append('    <part id="%d" subtype="normal_part">\n' % obj.sub_id)
-        out.append(_meta_line("      ", "name", obj.spec.name))
-        out.append(_meta_line("      ", "matrix", "1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"))
-        out.append(_meta_line("      ", "source_file", obj.spec.source))
-        out.append(_meta_line("      ", "source_object_id", "0"))
-        out.append(_meta_line("      ", "source_volume_id", "0"))
-        for axis, value in zip("xyz", obj.offset):
-            out.append(_meta_line("      ", "source_offset_" + axis, repr(float(value))))
-        out += [_meta_line("      ", k, v) for k, v in part_meta]
-        out.append('      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" '
-                   'facets_reversed="0" backwards_edges="0"/>\n    </part>\n')
+        for k, vol in enumerate(obj.volumes):
+            part_meta = []
+            if vol.old_part is not None:
+                part_meta = [(key, v) for key, v in vol.old_part.meta.items() if key not in PART_KEYS]
+            out.append('    <part id="%d" subtype="normal_part">\n' % vol.sub_id)
+            out.append(_meta_line("      ", "name", vol.spec.name))
+            out.append(_meta_line("      ", "matrix", _matrix_text(vol.transform)))
+            out.append(_meta_line("      ", "source_file", vol.spec.source))
+            out.append(_meta_line("      ", "source_object_id", "0"))
+            out.append(_meta_line("      ", "source_volume_id", str(k)))
+            for axis, value in zip("xyz", vol.offset):
+                out.append(_meta_line("      ", "source_offset_" + axis, repr(float(value))))
+            out += [_meta_line("      ", key, v) for key, v in part_meta]
+            out.append('      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" '
+                       'facets_reversed="0" backwards_edges="0"/>\n    </part>\n')
         for extra in obj.extra_volumes:
             out.append(re.sub(r'\bid="[^"]*"', 'id="%d"' % extra.sub_id, extra.raw_part, count=1) + "\n")
         out.append('  </object>\n')
@@ -685,11 +835,12 @@ def _check(path, objects):
         for name in z.namelist():
             if name.endswith((".model", ".rels", ".xml")) or name == reload3mf.MODEL_SETTINGS:
                 ET.fromstring(z.read(name))
-        for n, obj in enumerate(objects, 1):
-            text = z.read(_file_name(obj.spec.name, n)).decode("utf-8")
-            if (text.count("<vertex ") != obj.mesh.vertex_count
-                    or text.count("<triangle ") != obj.mesh.triangle_count):
-                raise ReloadError("written mesh of %s does not match" % obj.spec.name)
+        for obj in objects:
+            for vol in obj.volumes:
+                text = z.read(vol.path).decode("utf-8")
+                if (text.count("<vertex ") != vol.mesh.vertex_count
+                        or text.count("<triangle ") != vol.mesh.triangle_count):
+                    raise ReloadError("written mesh of %s does not match" % vol.spec.name)
 
 
 def build(spec, stl_cache=None, dry_run=False):
@@ -728,7 +879,9 @@ def build(spec, stl_cache=None, dry_run=False):
                                                                 "y" if copies == 1 else "ies"))
             for obj in on:
                 size = tuple(h - l for h, l in zip(obj.hi, obj.lo))
-                text = "    %s  %s  %.1f x %.1f x %.1f mm" % (obj.spec.name, os.path.basename(obj.spec.stl), *size)
+                what = ("assembly of %d parts" % len(obj.volumes) if obj.assembly
+                        else os.path.basename(obj.spec.stl))
+                text = "    %s  %s  %.1f x %.1f x %.1f mm" % (obj.spec.name, what, *size)
                 if len(obj.transforms) > 1:
                     text += "  x%d" % len(obj.transforms)
                 if obj.old is not None and any(k != "extruder" for k, _ in obj.old.meta):
@@ -756,7 +909,8 @@ def build(spec, stl_cache=None, dry_run=False):
 
 
 class ImportedPart:
-    def __init__(self, name, source, up, angle, copies, stl=None, note="", mirror=False):
+    def __init__(self, name, source, up, angle, copies, stl=None, note="", mirror=False, assembly="",
+                 place=(0.0, 0.0, 0.0)):
         self.name = name
         self.source = source  # source_file as stored in the project
         self.stl = stl  # the STL found for it, or None
@@ -765,6 +919,21 @@ class ImportedPart:
         self.copies = copies
         self.note = note
         self.mirror = mirror
+        self.assembly = assembly  # name of the Orca object of several parts it is part of, or ""
+        self.place = place  # middle of its bounding box in that object, turned like the object's first copy
+
+
+def _orientation(rows):
+    """(up, angle, mirror) of a rotation, a mirror factored out as one across the part's own X axis."""
+    mirror = layout.det(rows) < 0.0
+    if mirror:
+        # Factor out the reflection as a mirror across the part's own X axis (M = R * diag(-1, 1, 1)),
+        # so the ImportedPart keeps the unmirrored up/turn and the mirror flag puts it back on Build.
+        rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
+    up, angle = layout.orientation_from_matrix(rows)
+    up = tuple(0.0 if abs(c) < 1e-9 else c for c in up)
+    angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
+    return up, angle, mirror
 
 
 def read_layout(path, finder, stl_cache=None):
@@ -786,39 +955,60 @@ def read_layout(path, finder, stl_cache=None):
             plates.append((int(meta.get("plater_id") or len(plates) + 1), meta.get("plater_name") or "", ids))
         plates.sort(key=lambda p: p[0])
         out = []
+        used_names = set()  # assembly names given so far: each assembly gets its own
         for _, name, ids in plates:
             parts, seen = [], {}
             for oid in ids:
                 if oid in seen:
-                    seen[oid].copies += 1
+                    for imported in seen[oid]:
+                        imported.copies += 1
                     continue
                 obj = project.objects.get(oid)
                 if obj is None:
                     continue
                 models = [p for p in obj.parts if p.is_model_part]
-                if len(obj.parts) != 1 or len(models) != 1:
-                    problems.append("%s: has %d parts, only objects of one STL are taken" % (obj.name, len(obj.parts)))
+                if not models:
+                    problems.append("%s: has no model part, left out" % obj.name)
                     continue
-                part = models[0]
-                transform = project.items[obj.items[0]][1] if obj.items else None
-                rows, _ = reload3mf.compose(reload3mf.parse_transform(transform),
-                                            reload3mf.parse_transform(part.transform))
-                mirror = layout.det(rows) < 0.0
-                if mirror:
-                    # Factor out the reflection as a mirror across the part's own X axis (M = R * diag(-1, 1, 1)),
-                    # so the ImportedPart keeps the unmirrored up/turn and the mirror flag puts it back on Build.
-                    rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
-                up, angle = layout.orientation_from_matrix(rows)
-                up = tuple(0.0 if abs(c) < 1e-9 else c for c in up)
-                stl, note = _find_source(project, part, finder, project_dir, stl_cache)
-                angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
-                imported = ImportedPart(obj.name, part.source, up, angle, 1, stl, note, mirror=mirror)
-                seen[oid] = imported
-                parts.append(imported)
+                transform = reload3mf.parse_transform(project.items[obj.items[0]][1] if obj.items else None)
+                if len(models) == 1:
+                    part = models[0]
+                    rows, _ = reload3mf.compose(transform, reload3mf.parse_transform(part.transform))
+                    up, angle, mirror = _orientation(rows)
+                    stl, note = _find_source(project, part, finder, project_dir, stl_cache)
+                    seen[oid] = [ImportedPart(obj.name, part.source, up, angle, 1, stl, note, mirror=mirror)]
+                else:
+                    assembly = _unique(obj.name, used_names)
+                    turn = (transform[0], (0.0, 0.0, 0.0))  # the first copy's turn, without its move
+                    seen[oid] = []
+                    for part in models:
+                        try:
+                            mesh = project.old_mesh(part)
+                        except ReloadError as e:
+                            problems.append("%s, %s: %s, left out" % (obj.name, part.name, e))
+                            continue
+                        rows, t = reload3mf.compose(turn, reload3mf.parse_transform(part.transform))
+                        place = tuple(round(c, 4) + 0.0 for c in reload3mf.compose((rows, t), (
+                            layout.IDENTITY, mesh.center()))[1])
+                        up, angle, mirror = _orientation(rows)
+                        stl, note = _find_source(project, part, finder, project_dir, stl_cache)
+                        seen[oid].append(ImportedPart(part.name, part.source, up, angle, 1, stl, note, mirror=mirror,
+                                                      assembly=assembly, place=place))
+                parts += seen[oid]
             out.append((name, parts))
         return out, problems
     finally:
         project.close()
+
+
+def _unique(name, used):
+    """name, or name 2, name 3, ... when it is taken; the one returned is taken from now on."""
+    unique, n = name, 1
+    while unique in used:
+        n += 1
+        unique = "%s %d" % (name, n)
+    used.add(unique)
+    return unique
 
 
 def _find_source(project, part, finder, project_dir, stl_cache):

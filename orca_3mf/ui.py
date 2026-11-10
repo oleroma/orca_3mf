@@ -15,6 +15,7 @@ ICONS = {
     'CHECK_OFF': 'CHECKBOX_DEHLT', 'ADD': 'ADD', 'DEL': 'TRASH', 'UP': 'TRIA_UP', 'DOWN': 'TRIA_DOWN',
     'COPY': 'COPYDOWN', 'PASTE': 'PASTEDOWN', 'RIGHT': 'TRIA_RIGHT', 'OPEN': 'TRIA_DOWN', 'ERROR': 'ERROR',
     'BLANK': 'BLANK1', 'CANCEL': 'CANCEL', 'TURN': 'DRIVER_ROTATIONAL_DIFFERENCE', 'UPAXIS': 'EMPTY_SINGLE_ARROW',
+    'ASSEMBLY': 'GROUP',
 }
 
 # Rows of a list: tall enough for its six buttons (the list scrolls beyond)
@@ -119,6 +120,8 @@ class ORCA_UL_parts(bpy.types.UIList):
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
+        if item.assembly.strip():
+            tools.label(text="", icon=ICONS['ASSEMBLY'])
         if item.copies > 1:
             tools.label(text="x%d" % item.copies)
         tools.label(text="", icon=ICONS['SEAM'] if item.seam else ICONS['BLANK'])
@@ -345,6 +348,11 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         row.prop(part, "copies")
         row = draw_label_row(box, "Mirror:")
         row.prop(part, "mirror", text="")
+        row = draw_label_row(box, "Assembly:")
+        row.prop(part, "assembly", text="")
+        if part.assembly.strip():
+            row = draw_label_row(box, "Place:")
+            row.prop(part, "place", text="")
         row = draw_label_row(box, "Seam:")
         row.prop(part, "seam", text="")
 

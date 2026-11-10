@@ -468,6 +468,104 @@ class BuildTest(unittest.TestCase):
         self.assertIn("object_id=1|1 2 3 0.5 4 5 6 0.5", brim)
         self.assertIn('<plate_info id="1"', gcode)
 
+    def kit(self, copies=1):
+        """A plate with part a alone and an assembly "kit" of b (stood on its side) and c, 40 mm apart."""
+        return [build3mf.PlateSpec("p", 5, [
+            build3mf.PartSpec("a.stl", self.stls["a"]),
+            build3mf.PartSpec("b.stl", self.stls["b"], (1, 0, 0), assembly="kit", place=(0, 0, 0)),
+            build3mf.PartSpec("c.stl", self.stls["c"], (0, 0, 1), math.radians(90), copies, assembly="kit",
+                              place=(40, 10, -14))])]
+
+    def volumes_in_world(self):
+        """{object name: [(part name, world lo, world hi)]} of each object's first copy."""
+        out = {}
+        project = reload3mf.Project(self.out)
+        try:
+            for obj in project.objects.values():
+                item = reload3mf.parse_transform(project.items[obj.items[0]][1])
+                for part in obj.parts:
+                    rows, t = reload3mf.compose(item, reload3mf.parse_transform(part.transform))
+                    lo, hi = layout.footprint(project.old_mesh(part).verts, rows)
+                    out.setdefault(obj.name, []).append((part.name, tuple(a + b for a, b in zip(lo, t)),
+                                                         tuple(a + b for a, b in zip(hi, t))))
+        finally:
+            project.close()
+        return out
+
+    def test_assembly_is_one_object_with_its_parts_in_place(self):
+        self.build(self.spec(self.kit(copies=2)))
+        text = self.settings_xml()
+        self.assertEqual(text.count("<object id="), 2)
+        self.assertEqual(text.count("<part "), 3)
+        self.assertEqual(text.count("<model_instance>"), 3)  # a once, the kit twice (its parts' most copies)
+        world = self.volumes_in_world()
+        (_, blo, bhi), (_, clo, chi) = world["kit"]
+        self.assertEqual(tuple(round(h - l, 4) for h, l in zip(bhi, blo)), (60, 30, 30))  # b on its side
+        self.assertEqual(tuple(round(h - l, 4) for h, l in zip(chi, clo)), (5, 10, 2))  # c turned 90 degrees
+        middle = lambda lo, hi: tuple((a + b) / 2 for a, b in zip(lo, hi))
+        self.assertTrue(close(tuple(c - b for c, b in zip(middle(clo, chi), middle(blo, bhi))), (40, 10, -14)))
+        self.assertAlmostEqual(min(blo[2], clo[2]), 0.0, places=5)  # the assembly stands on the bed
+        lines = build3mf.build(self.spec(self.kit(copies=2)), dry_run=True)[0]
+        self.assertTrue(any("kit  assembly of 2 parts" in line and "x2" in line for line in lines), lines)
+
+    def test_assembly_survives_import_and_rebuild(self):
+        self.build(self.spec(self.kit()))
+        # Orca keeps an assembly's turn in its copy: turn the copy a quarter and its parts back, same world places
+        root = zipfile.ZipFile(self.out).read(reload3mf.ROOT_MODEL).decode()
+        kit_id = re.search(r'<object id="(\d+)"[^>]*>\s*<components>(?:\s*<component [^>]*/>){2}', root).group(1)
+        quarter, back = (((0.0, -1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)), (0.0, 0.0, 0.0)), \
+            (((0.0, 1.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)), (0.0, 0.0, 0.0))
+
+        def turn_item(m):
+            rows, t = reload3mf.parse_transform(m.group(2))
+            return m.group(1) + build3mf._transform_text((reload3mf.compose(quarter, (rows, (0, 0, 0)))[0], t))
+
+        def turn_components(m):
+            return re.sub(r'(transform=")([^"]*)', lambda c: c.group(1) + build3mf._transform_text(
+                reload3mf.compose(back, reload3mf.parse_transform(c.group(2)))), m.group(0))
+        root = re.sub(r'(<item objectid="%s"[^>]*transform=")([^"]*)' % kit_id, turn_item, root)
+        root = re.sub(r'<object id="%s".*?</object>' % kit_id, turn_components, root, flags=re.S)
+        self.replace_entry(reload3mf.ROOT_MODEL, root)
+        text = self.settings_xml().replace('<metadata key="name" value="c.stl"/>',
+                                           '<metadata key="name" value="c.stl"/>\n'
+                                           '      <metadata key="extruder" value="2"/>')
+        self.replace_entry(reload3mf.MODEL_SETTINGS, text)
+        before = self.volumes_in_world()["kit"]
+
+        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([os.path.join(self.dir, "stl")]))
+        self.assertEqual(problems, [])
+        parts = {p.name: p for p in plates[0][1]}
+        self.assertEqual(sorted(parts), ["a.stl", "b.stl", "c.stl"])
+        self.assertEqual(parts["a.stl"].assembly, "")
+        self.assertEqual((parts["b.stl"].assembly, parts["c.stl"].assembly), ("kit", "kit"))
+        self.assertEqual((parts["b.stl"].stl, parts["c.stl"].stl), (self.stls["b"], self.stls["c"]))
+        self.assertTrue(close(tuple(c - b for c, b in zip(parts["c.stl"].place, parts["b.stl"].place)),
+                              (40, 10, -14), 1e-3))  # as they were on the bed
+
+        # Rebuilt from what was imported: the parts stay where they were and keep their settings
+        rebuilt = [build3mf.PlateSpec("p", 5, [
+            build3mf.PartSpec(p.name, p.stl, p.up, p.angle, p.copies, mirror=p.mirror, assembly=p.assembly,
+                              place=p.place) for p in plates[0][1]])]
+        self.build(self.spec(rebuilt))
+        after = self.volumes_in_world()["kit"]
+        shift = tuple(a - b for a, b in zip(after[0][1], before[0][1]))
+        for (name, lo, hi), (name0, lo0, hi0) in zip(after, before):
+            self.assertEqual(name, name0)
+            self.assertTrue(close(tuple(a - b for a, b in zip(lo, lo0)), shift, 1e-3))
+            self.assertTrue(close(tuple(a - b for a, b in zip(hi, hi0)), shift, 1e-3))
+        self.assertIn('<metadata key="extruder" value="2"/>', self.settings_xml())
+
+    def test_assemblies_with_the_same_name_stay_apart_on_import(self):
+        plates = self.kit()
+        plates.append(build3mf.PlateSpec("q", 5, [
+            build3mf.PartSpec("a.stl", self.stls["a"], assembly="kit"),
+            build3mf.PartSpec("c.stl", self.stls["c"], assembly="kit", place=(30, 0, 0))]))
+        self.build(self.spec(plates))
+        plates_out, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([os.path.join(self.dir, "stl")]))
+        self.assertEqual(problems, [])
+        self.assertEqual([[p.assembly for p in parts] for _, parts in plates_out],
+                         [["", "kit", "kit"], ["kit 2", "kit 2"]])
+
     def test_common_folder(self):
         self.assertEqual(build3mf.common_folder(["GripV/parts/a.stl", "GripV/parts/x/b.stl"]), "GripV/parts")
         self.assertEqual(build3mf.common_folder(["a.stl", "GripV/b.stl"]), "")
