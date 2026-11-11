@@ -289,41 +289,6 @@ def same_shape(old, new, old_shift, new_shift):
     return True
 
 
-def same_triangles(old, new, old_shift, new_shift):
-    """True when both meshes hold the same triangles once moved by their shifts, in any order and with any vertex
-    numbering (Orca can store a part's triangles in another order than its STL has them). Coordinates are compared
-    on a grid of a thousandth of a millimetre; a corner that lands next to a grid line is also tried on the other
-    side."""
-    if old.triangle_count != new.triangle_count:
-        return False
-
-    def corners(mesh, shift):
-        v = mesh.verts
-        out = []
-        for t in range(mesh.triangle_count):
-            tri = [tuple(v[3 * mesh.tris[3 * t + c] + k] + shift[k] for k in range(3)) for c in range(3)]
-            out.append(tri)
-        return out
-
-    def key(tri, offset=0.0):
-        pts = [tuple(int(math.floor(x * 1000.0 + offset)) for x in p) for p in tri]
-        k = pts.index(min(pts))  # start at the smallest corner, keep the winding
-        return tuple(pts[k:] + pts[:k])
-
-    have = {}
-    for tri in corners(old, old_shift):
-        k = key(tri, 0.5)
-        have[k] = have.get(k, 0) + 1
-    for tri in corners(new, new_shift):
-        for k in (key(tri, 0.5), key(tri, 0.0), key(tri, 1.0)):
-            if have.get(k):
-                have[k] -= 1
-                break
-        else:
-            return False
-    return True
-
-
 # --------------------------------------------------------------------------
 # Transforms (3MF stores 3x4 matrices column by column)
 

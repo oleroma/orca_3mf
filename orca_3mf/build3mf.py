@@ -771,7 +771,7 @@ def read_layout(path, finder, stl_cache=None):
     """Plates of an existing project: [(plate name, [ImportedPart])], and problem lines.
 
     finder: reload3mf.SourceFinder for the STLs. A file name found in several folders (a part exported with
-    several tolerances) is matched by its shape."""
+    several tolerances) is taken from the folder the plate is named after (_find_source)."""
     stl_cache = {} if stl_cache is None else stl_cache
     project = reload3mf.Project(path)
     problems = []
@@ -786,6 +786,7 @@ def read_layout(path, finder, stl_cache=None):
             plates.append((int(meta.get("plater_id") or len(plates) + 1), meta.get("plater_name") or "", ids))
         plates.sort(key=lambda p: p[0])
         out = []
+        folders = {}  # the folders below the STL root, read once
         for _, name, ids in plates:
             parts, seen = [], {}
             for oid in ids:
@@ -810,7 +811,7 @@ def read_layout(path, finder, stl_cache=None):
                     rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
                 up, angle = layout.orientation_from_matrix(rows)
                 up = tuple(0.0 if abs(c) < 1e-9 else c for c in up)
-                stl, note = _find_source(project, part, finder, project_dir, stl_cache)
+                stl, note = _find_source(part, finder, project_dir, name, folders)
                 angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
                 imported = ImportedPart(obj.name, part.source, up, angle, 1, stl, note, mirror=mirror)
                 seen[oid] = imported
@@ -821,33 +822,52 @@ def read_layout(path, finder, stl_cache=None):
         project.close()
 
 
-def _find_source(project, part, finder, project_dir, stl_cache):
+def _find_source(part, finder, project_dir, plate_name, folders):
+    """(STL path or None, note). The stored path, else the only file of that name below the STL root. When several
+    files have that name (one part exported with several tolerances), the plate's name says where it is: a plate
+    named after a folder ("tight/cap_loose") takes the file from the folder below the STL root whose path ends in that
+    name, or from the nearest folder above it. Nothing is guessed: else the part is not found."""
     path, problem = finder.find(part.source, project_dir)
     if path is not None:
         return path, ""
-    names = finder._name_index().get(os.path.basename(part.source.replace("\\", "/")).lower(), ())
+    file_name = os.path.basename(part.source.replace("\\", "/"))
+    names = finder._name_index().get(file_name.lower(), ())
     if not names:
         return None, problem or "STL not found"
-    try:
-        old = project.old_mesh(part)
-    except ReloadError as e:
-        return None, str(e)
-    same = []
-    for cand in sorted(names):
-        try:
-            key = os.path.normcase(os.path.abspath(cand))
-            if key not in stl_cache:
-                stl_cache[key] = reload3mf.read_stl(cand)
-            stl = stl_cache[key][0]
-        except (ReloadError, OSError):
-            continue
-        shift = tuple(o - s for o, s in zip(old.center(), stl.center()))
-        if (reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0), shift)
-                or reload3mf.same_triangles(old, stl, (0.0, 0.0, 0.0), shift)):
-            same.append(cand)
-    if len(same) == 1:
-        return same[0], "matched by shape among %d files named %s" % (len(names), os.path.basename(same[0]))
-    return None, problem or "STL not found"
+    found = set()
+    for folder in _plate_folders(plate_name, finder, folders):
+        while True:
+            hit = next((n for n in names if os.path.normcase(os.path.dirname(n)) == os.path.normcase(folder)), None)
+            if hit is not None:
+                found.add(hit)
+                break
+            if any(os.path.normcase(folder) == os.path.normcase(r) for r in finder.search_dirs):
+                break
+            up = os.path.dirname(folder)
+            if up == folder:
+                break
+            folder = up
+    if len(found) == 1:
+        return found.pop(), "from the plate's folder %s" % plate_name
+    if found:
+        return None, "%d files named %s fit the plate's folder %s" % (len(found), file_name, plate_name)
+    return None, (problem or "STL not found") + "; name the plate after its folder (like tight/cap_loose) to " \
+        "say which one"
+
+
+def _plate_folders(plate_name, finder, folders):
+    """The folders below the STL root whose path ends in the plate's name ("tight/cap_loose"), or []."""
+    want = [p.lower() for p in re.split(r"[\\/]+", plate_name.strip()) if p]
+    if not want:
+        return []
+    if "all" not in folders:
+        folders["all"] = [d for root in finder.search_dirs for d, _, _ in os.walk(root)]
+    out = []
+    for d in folders["all"]:
+        pieces = [p.lower() for p in re.split(r"[\\/]+", d) if p]
+        if pieces[-len(want):] == want:
+            out.append(d)
+    return out
 
 
 def common_folder(paths):

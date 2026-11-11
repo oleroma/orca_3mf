@@ -6,7 +6,7 @@
 - A plate has a name and a gap. Build nests each plate (bounding boxes, largest first, centred) and lays plates out on Orca's grid.
 - Build uses the STLs Combi Export already wrote, not Blender meshes. Only the seam lines come from the scene.
 - A new project takes its printer settings from "Settings from" (any Orca project for the printer). An existing file keeps its settings, part settings and plate settings, and keeps painting when the shape did not change.
-- Import makes a project from an existing Orca 3MF (STLs found below the STL root, matched by shape when names repeat). Mirrored parts come back with their Mirror tick set.
+- Import makes a project from an existing Orca 3MF (STLs found below the STL root; when a file name repeats, from the folder the plate is named after). Mirrored parts come back with their Mirror tick set.
 
 ## Changes done in this pass
 
@@ -32,7 +32,7 @@
 ## Verification
 
 ```
-python -I tests/test_build.py        # 23 OK
+python -I tests/test_build.py        # 22 OK
 python -I tests/test_seams.py        # 8 OK
 python -I tests/test_reload.py       # 17 OK
 python -I tests/test_paths.py        # 17 OK
@@ -51,7 +51,7 @@ Also smoke-tested against `GripV_parts.3mf` (import -> rebuild round-trips 31 pa
 
 - **Build progress bar** — looks like Combi Export's export bar: the row's Build button turns into a Cancel button, the row's fields are greyed out, and a slider at the row's end shows `Part 3/12 | 4.2s` (then `3MF 1/2 | ...` while writing). Build all does the same in the 3MF root row. How it runs fits this add-on, not Combi's (which polls a worker process): Build pressed in the tab is a modal operator with a timer that does one part per tick (read the STL, paint its seam) and writes each 3MF in a tick of its own; everything is taken from the scene before the first tick, so editing the tab mid-build does not change the build. Events pass through; Cancel stops it and the log says how many projects were written. Which build runs is kept in the module (`props.building()`), so a restart always starts idle. From a script or with no window, Build still runs at once (`execute`). Files: `operators.py` (`_build_steps`, `ORCA_OT_build`, `ORCA_OT_cancel_build`), `props.py`, `ui.py` (`draw_build_button`, `draw_progress`). Tests: `test_build_steps_report_progress_part_by_part` (drives the modal with plain events), `test_panels_draw`.
 
-- **Parts stored in another order** (2026-11-11) — Orca (BambuStudio 02.08 format) saves only the file name as `source_file`, so Import finds a part among same-named STLs by shape. Orca can store a part's triangles and vertices in another order than the STL, which `same_shape` (order-sensitive) missed: dpad/button in GripV_buttons_tol_grid.3mf came in as not found. `reload3mf.same_triangles` compares the triangles in any order (corners on a 0.001 mm grid, winding kept) and is used only for finding the STL on Import; Build still needs the same order to keep painting. Test: `test_part_stored_in_another_triangle_order_is_matched_by_shape`. Checked on the real file: every dpad and button found. Its "tight ..." plates hold the loose dpad (and one loose button) shapes, so they import with loose paths. Orca assemblies stay unsupported (PR #11 closed by choice).
+- **Repeated file names come from the plate's folder** (2026-11-11) — Orca (with "store full source paths" off) saves only the file name as `source_file`, and Olex's tolerance variants all share names (tight/button.stl, loose/button.stl, ...). Shape matching is gone from Import (Olex: shapes change when a tolerance changes, so it must never guess). Now `_find_source`: the stored path, else the only file of that name below the STL root, else the plate's name read as a folder: the folder below the STL root whose path ends in the plate name ("tight/cap_loose"), then each folder above it, up to the STL root. Several or no hits: the part is not found (red), with a note saying to name the plate after its folder. Orca keeps plate names on save. Test: `test_same_file_name_in_several_folders_comes_from_the_plate_folder`. Checked on GripV_buttons_tol_grid.3mf with its 9 plates renamed to folder names: every dpad, select and button found. Its "tight ..." plates held the loose dpad shapes, which shape matching had mislabelled as loose. Orca assemblies stay unsupported (PR #11 closed by choice).
 
 ## Still to do
 

@@ -207,42 +207,32 @@ class BuildTest(unittest.TestCase):
                        ("b.stl", (1.0, 0.0, 0.0), 0.0, 1, self.stls["b"])]),
             ("second", [("c.stl", (0.0, 0.0, 1.0), 0.0, 4, self.stls["c"])])])
 
-    def test_same_file_name_in_several_folders_is_matched_by_shape(self):
-        # Tight and loose versions of a part share the file name; Orca kept only the name
-        tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
-        self.write("knob", (10.4, 10.4, 10), (0, 0, 5), "loose")
-        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", tight)])]))
-        text = self.settings_xml().replace('value="%s"' % tight, 'value="knob.stl"')
+    def test_same_file_name_in_several_folders_comes_from_the_plate_folder(self):
+        # Every tolerance has its own button.stl and dpad.stl, all the same shape; Orca kept only the file names.
+        # The plate named after a folder says which: dpad.stl from that folder, button.stl from the folder above.
+        stl = {}
+        for tol in ("tight", "loose"):
+            stl[tol] = self.write("button", (10, 10, 4), (0, 0, 2), "buttons/%s" % tol)
+            for cap in ("cap_tight", "cap_loose"):
+                stl[tol, cap] = self.write("dpad", (12, 8, 3), (0, 0, 1.5), "buttons/%s/%s" % (tol, cap))
+        plates = [build3mf.PlateSpec(name, 5, [build3mf.PartSpec("button.stl", stl[tol]),
+                                               build3mf.PartSpec("dpad.stl", stl[tol, cap])])
+                  for name, tol, cap in (("tight/cap_loose", "tight", "cap_loose"),
+                                         ("loose/cap_tight", "loose", "cap_tight"),
+                                         ("Plate 3", "tight", "cap_tight"))]
+        self.build(self.spec(plates))
+        text = self.settings_xml()
+        for path in stl.values():
+            text = text.replace('value="%s"' % path, 'value="%s"' % os.path.basename(path))
         self.replace_entry(reload3mf.MODEL_SETTINGS, text)
         plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
-        part = plates[0][1][0]
-        self.assertEqual(part.stl, tight)
-        self.assertIn("matched by shape", part.note)
-
-    def test_part_stored_in_another_triangle_order_is_matched_by_shape(self):
-        # Orca can store a part's triangles and vertices in another order than its STL has them
-        tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
-        self.write("knob", (10.4, 10.4, 10), (0, 0, 5), "loose")
-        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", tight)])]))
-        self.replace_entry(reload3mf.MODEL_SETTINGS,
-                           self.settings_xml().replace('value="%s"' % tight, 'value="knob.stl"'))
-        with zipfile.ZipFile(self.out) as z:
-            name = [n for n in z.namelist() if n.startswith("3D/Objects/knob.stl")][0]
-            text = z.read(name).decode()
-        verts = re.findall(r"<vertex [^>]*/>", text)
-        tris = re.findall(r'<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"\s*/>', text)
-        order = list(reversed(range(len(verts))))  # new vertex k is old vertex order[k]
-        new_of = {old: k for k, old in enumerate(order)}
-        tris = [(new_of[int(b)], new_of[int(c)], new_of[int(a)]) for a, b, c in reversed(tris)]  # same winding
-        text = re.sub(r"<vertices>.*</vertices>", "<vertices>\n" + "\n".join(verts[k] for k in order) +
-                      "\n</vertices>", text, flags=re.S)
-        text = re.sub(r"<triangles>.*</triangles>", "<triangles>\n" + "\n".join(
-            '<triangle v1="%d" v2="%d" v3="%d"/>' % t for t in tris) + "\n</triangles>", text, flags=re.S)
-        self.replace_entry(name, text)
-        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
-        part = plates[0][1][0]
-        self.assertEqual(part.stl, tight)
-        self.assertIn("matched by shape", part.note)
+        got = {name: {p.name: p.stl for p in parts} for name, parts in plates}
+        self.assertEqual(got["tight/cap_loose"], {"button.stl": stl["tight"], "dpad.stl": stl["tight", "cap_loose"]})
+        self.assertEqual(got["loose/cap_tight"], {"button.stl": stl["loose"], "dpad.stl": stl["loose", "cap_tight"]})
+        # A plate not named after a folder: nothing is guessed, and the note says how to fix it
+        self.assertEqual(got["Plate 3"], {"button.stl": None, "dpad.stl": None})
+        note = next(p.note for name, parts in plates if name == "Plate 3" for p in parts)
+        self.assertIn("name the plate after its folder", note)
 
     def replace_entry(self, name, text):
         tmp = self.out + ".tmp"
