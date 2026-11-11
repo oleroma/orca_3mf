@@ -219,6 +219,31 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(part.stl, tight)
         self.assertIn("matched by shape", part.note)
 
+    def test_part_stored_in_another_triangle_order_is_matched_by_shape(self):
+        # Orca can store a part's triangles and vertices in another order than its STL has them
+        tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
+        self.write("knob", (10.4, 10.4, 10), (0, 0, 5), "loose")
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", tight)])]))
+        self.replace_entry(reload3mf.MODEL_SETTINGS,
+                           self.settings_xml().replace('value="%s"' % tight, 'value="knob.stl"'))
+        with zipfile.ZipFile(self.out) as z:
+            name = [n for n in z.namelist() if n.startswith("3D/Objects/knob.stl")][0]
+            text = z.read(name).decode()
+        verts = re.findall(r"<vertex [^>]*/>", text)
+        tris = re.findall(r'<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"\s*/>', text)
+        order = list(reversed(range(len(verts))))  # new vertex k is old vertex order[k]
+        new_of = {old: k for k, old in enumerate(order)}
+        tris = [(new_of[int(b)], new_of[int(c)], new_of[int(a)]) for a, b, c in reversed(tris)]  # same winding
+        text = re.sub(r"<vertices>.*</vertices>", "<vertices>\n" + "\n".join(verts[k] for k in order) +
+                      "\n</vertices>", text, flags=re.S)
+        text = re.sub(r"<triangles>.*</triangles>", "<triangles>\n" + "\n".join(
+            '<triangle v1="%d" v2="%d" v3="%d"/>' % t for t in tris) + "\n</triangles>", text, flags=re.S)
+        self.replace_entry(name, text)
+        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        part = plates[0][1][0]
+        self.assertEqual(part.stl, tight)
+        self.assertIn("matched by shape", part.note)
+
     def replace_entry(self, name, text):
         tmp = self.out + ".tmp"
         with zipfile.ZipFile(self.out) as src, zipfile.ZipFile(tmp, "w") as dst:

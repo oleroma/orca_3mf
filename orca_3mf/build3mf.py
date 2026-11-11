@@ -842,7 +842,8 @@ def _find_source(project, part, finder, project_dir, stl_cache):
         except (ReloadError, OSError):
             continue
         shift = tuple(o - s for o, s in zip(old.center(), stl.center()))
-        if reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0), shift):
+        if (reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0), shift)
+                or reload3mf.same_triangles(old, stl, (0.0, 0.0, 0.0), shift)):
             same.append(cand)
     if len(same) == 1:
         return same[0], "matched by shape among %d files named %s" % (len(names), os.path.basename(same[0]))
