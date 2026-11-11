@@ -956,6 +956,7 @@ def read_layout(path, finder, stl_cache=None):
         plates.sort(key=lambda p: p[0])
         out = []
         used_names = set()  # assembly names given so far: each assembly gets its own
+        found = {}  # {folder: parts whose STL was found there}
         for _, name, ids in plates:
             parts, seen = [], {}
             for oid in ids:
@@ -973,25 +974,42 @@ def read_layout(path, finder, stl_cache=None):
                 transform = reload3mf.parse_transform(project.items[obj.items[0]][1] if obj.items else None)
                 if len(models) == 1:
                     part = models[0]
+                    stl, note, fit = _find_source(project, part, finder, project_dir, stl_cache, (found,))
                     rows, _ = reload3mf.compose(transform, reload3mf.parse_transform(part.transform))
+                    if fit:
+                        rows = layout.matmul(rows, fit[0])
                     up, angle, mirror = _orientation(rows)
-                    stl, note = _find_source(project, part, finder, project_dir, stl_cache)
+                    _count(found, stl)
                     seen[oid] = [ImportedPart(obj.name, part.source, up, angle, 1, stl, note, mirror=mirror)]
                 else:
                     assembly = _unique(obj.name, used_names)
                     turn = (transform[0], (0.0, 0.0, 0.0))  # the first copy's turn, without its move
                     seen[oid] = []
+                    mine = {}  # folders of this assembly's parts found so far
+                    # Parts whose stored path leads to their STL first: their folders help pick the others
+                    found_first = sorted(models, key=lambda m: finder.find(m.source, project_dir)[0] is None)
+                    sources = {}
+                    for part in found_first:
+                        sources[part.id] = _find_source(project, part, finder, project_dir, stl_cache, (mine, found))
+                        _count(mine, sources[part.id][0])
                     for part in models:
                         try:
                             mesh = project.old_mesh(part)
                         except ReloadError as e:
                             problems.append("%s, %s: %s, left out" % (obj.name, part.name, e))
                             continue
+                        stl, note, fit = sources[part.id]
+                        _count(found, stl)
+                        middle = mesh.center()
+                        if fit:
+                            # The STL's middle where the stored, turned mesh has it
+                            middle = reload3mf.compose(fit, (layout.IDENTITY, _stl(stl, stl_cache).center()))[1]
                         rows, t = reload3mf.compose(turn, reload3mf.parse_transform(part.transform))
                         place = tuple(round(c, 4) + 0.0 for c in reload3mf.compose((rows, t), (
-                            layout.IDENTITY, mesh.center()))[1])
+                            layout.IDENTITY, middle))[1])
+                        if fit:
+                            rows = layout.matmul(rows, fit[0])
                         up, angle, mirror = _orientation(rows)
-                        stl, note = _find_source(project, part, finder, project_dir, stl_cache)
                         seen[oid].append(ImportedPart(part.name, part.source, up, angle, 1, stl, note, mirror=mirror,
                                                       assembly=assembly, place=place))
                 parts += seen[oid]
@@ -999,6 +1017,12 @@ def read_layout(path, finder, stl_cache=None):
         return out, problems
     finally:
         project.close()
+
+
+def _count(counter, path):
+    if path:
+        folder = os.path.dirname(path)
+        counter[folder] = counter.get(folder, 0) + 1
 
 
 def _unique(name, used):
@@ -1011,32 +1035,107 @@ def _unique(name, used):
     return unique
 
 
-def _find_source(project, part, finder, project_dir, stl_cache):
+def _stl(path, stl_cache):
+    key = os.path.normcase(os.path.abspath(path))
+    if key not in stl_cache:
+        stl_cache[key] = reload3mf.read_stl(path)
+    return stl_cache[key][0]
+
+
+def _fit(old, stl):
+    """How Orca's stored mesh sits against the STL: None when it is the STL only moved, else the (rows, translation)
+    that turns the STL into it (Orca may store a part's turn in the mesh itself, as for the parts of an assembly),
+    or False when it is another shape."""
+    shift = tuple(o - s for o, s in zip(old.center(), stl.center()))
+    if reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0), shift):
+        return None
+    if old.vertex_count != stl.vertex_count or old.triangle_count != stl.triangle_count or old.vertex_count < 4:
+        return False
+    ov, sv = old.verts, stl.verts
+    n = stl.vertex_count
+    sm = tuple(sum(sv[k::3]) / n for k in range(3))
+    om = tuple(sum(ov[k::3]) / n for k in range(3))
+    s_at = lambda i: tuple(sv[3 * i + k] - sm[k] for k in range(3))
+    o_at = lambda i: tuple(ov[3 * i + k] - om[k] for k in range(3))
+    # Three well spread vertices: far from the middle, far from the first, far off the line through both
+    a = max(range(n), key=lambda i: sum(c * c for c in s_at(i)))
+    pa = s_at(a)
+    b = max(range(n), key=lambda i: sum((c - d) ** 2 for c, d in zip(s_at(i), pa)))
+    pb = s_at(b)
+
+    def off_line(i):
+        q = s_at(i)
+        return sum(c * c for c in _cross(pa, pb, q))
+    c = max(range(n), key=off_line)
+    zero = (0.0, 0.0, 0.0)
+    u_s, v_s = (tuple(y - x for x, y in zip(s_at(a), s_at(i))) for i in (b, c))
+    u_o, v_o = (tuple(y - x for x, y in zip(o_at(a), o_at(i))) for i in (b, c))
+    w_s, w_o = _cross(zero, u_s, v_s), _cross(zero, u_o, v_o)
+    try:
+        inv = reload3mf.invert((tuple(zip(u_s, v_s, w_s)), zero))[0]
+    except ReloadError:
+        return False
+    extent = max(max(stl.size()), 1.0)
+    tol = max(reload3mf.SAME_TOL, 1e-5 * extent)
+    for sign in (1.0, -1.0):  # a turn, or a mirrored one
+        rows = layout.matmul(tuple(zip(u_o, v_o, (sign * x for x in w_o))), inv)
+        if any(abs(sum(rows[k][i] * rows[k][j] for k in range(3)) - (1.0 if i == j else 0.0)) > 1e-3
+               for i in range(3) for j in range(3)):
+            continue  # a stretch: not this shape
+        t = tuple(om[k] - sum(rows[k][j] * sm[j] for j in range(3)) for k in range(3))
+        if all(abs(rows[k][0] * sv[3 * i] + rows[k][1] * sv[3 * i + 1] + rows[k][2] * sv[3 * i + 2] + t[k]
+                   - ov[3 * i + k]) <= tol for i in range(n) for k in range(3)):
+            return rows, t
+    return False
+
+
+def _cross(a, b, q):
+    """(b - a) x (q - a)."""
+    u = tuple(y - x for x, y in zip(a, b))
+    v = tuple(y - x for x, y in zip(a, q))
+    return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+
+def _find_source(project, part, finder, project_dir, stl_cache, prefer=()):
+    """(STL path or None, note, fit): fit as _fit gives it for the found STL (None: only moved).
+
+    A file name found in several folders is matched by its shape. When several of them have that shape, the one in
+    the folder of the `prefer` counters ({folder: parts found there}, first counter first) is taken."""
     path, problem = finder.find(part.source, project_dir)
     if path is not None:
-        return path, ""
+        try:
+            fit = _fit(project.old_mesh(part), _stl(path, stl_cache))
+        except (ReloadError, OSError):
+            fit = None
+        return path, "", (fit or None)
     names = finder._name_index().get(os.path.basename(part.source.replace("\\", "/")).lower(), ())
     if not names:
-        return None, problem or "STL not found"
+        return None, problem or "STL not found", None
     try:
         old = project.old_mesh(part)
     except ReloadError as e:
-        return None, str(e)
+        return None, str(e), None
     same = []
     for cand in sorted(names):
         try:
-            key = os.path.normcase(os.path.abspath(cand))
-            if key not in stl_cache:
-                stl_cache[key] = reload3mf.read_stl(cand)
-            stl = stl_cache[key][0]
+            fit = _fit(old, _stl(cand, stl_cache))
         except (ReloadError, OSError):
             continue
-        shift = tuple(o - s for o, s in zip(old.center(), stl.center()))
-        if reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0), shift):
-            same.append(cand)
+        if fit is not False:
+            same.append((cand, fit))
+    if not same:
+        return None, problem or "STL not found", None
+    name = os.path.basename(same[0][0])
     if len(same) == 1:
-        return same[0], "matched by shape among %d files named %s" % (len(names), os.path.basename(same[0]))
-    return None, problem or "STL not found"
+        return same[0][0], "matched by shape among %d files named %s" % (len(names), name), same[0][1]
+    for counter in prefer:
+        best = max(counter.get(os.path.dirname(c), 0) for c, _ in same)
+        if best > 0:
+            picked = [(c, f) for c, f in same if counter.get(os.path.dirname(c), 0) == best]
+            if len(picked) == 1:
+                return picked[0][0], "%d files named %s have this shape; took the one in the folder of the " \
+                    "other parts" % (len(same), name), picked[0][1]
+    return same[0][0], "%d files named %s have this shape; took the first" % (len(same), name), same[0][1]
 
 
 def common_folder(paths):

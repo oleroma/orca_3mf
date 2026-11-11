@@ -555,6 +555,44 @@ class BuildTest(unittest.TestCase):
             self.assertTrue(close(tuple(a - b for a, b in zip(hi, hi0)), shift, 1e-3))
         self.assertIn('<metadata key="extruder" value="2"/>', self.settings_xml())
 
+    def test_assembly_part_with_lost_path_and_turned_mesh_is_found(self):
+        # Orca's Assemble can keep only the file name and store a part's turn in its mesh: c.stl is stored turned a
+        # quarter (its part transform turned back, so it sits as before), and another folder has the same shape
+        self.build(self.spec(self.kit()))
+        shutil.copy(self.stls["c"], self.write("c", (1, 1, 1), (0, 0, 0), "other"))
+        before = self.volumes_in_world()["kit"]
+        with zipfile.ZipFile(self.out) as z:
+            sub = [n for n in z.namelist() if n.startswith("3D/Objects/kit_2_c.stl")][0]
+            sub_text = z.read(sub).decode()
+            root = z.read(reload3mf.ROOT_MODEL).decode()
+
+        def quarter(m):
+            x, y, z = (float(v) for v in m.groups())
+            return '<vertex x="%.9g" y="%.9g" z="%.9g"/>' % (-y, x, z)
+        self.replace_entry(sub, re.sub(r'<vertex x="([^"]*)" y="([^"]*)" z="([^"]*)"\s*/>', quarter, sub_text))
+        back = (((0.0, 1.0, 0.0), (-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)), (0.0, 0.0, 0.0))
+        root = re.sub(r'(<component p:path="/%s"[^>]*transform=")([^"]*)' % re.escape(sub), lambda m: m.group(1) +
+                      build3mf._transform_text(reload3mf.compose(reload3mf.parse_transform(m.group(2)), back)), root)
+        self.replace_entry(reload3mf.ROOT_MODEL, root)
+        self.replace_entry(reload3mf.MODEL_SETTINGS,
+                           self.settings_xml().replace('value="%s"' % self.stls["c"], 'value="c.stl"'))
+        self.assertEqual([v[1:] for v in self.volumes_in_world()["kit"]], [v[1:] for v in before])
+
+        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        self.assertEqual(problems, [])
+        c = next(p for p in plates[0][1] if p.name == "c.stl")
+        self.assertEqual(c.stl, self.stls["c"])  # the folder of the assembly's other part
+        self.assertIn("have this shape", c.note)
+        rebuilt = [build3mf.PlateSpec("p", 5, [
+            build3mf.PartSpec(p.name, p.stl, p.up, p.angle, p.copies, mirror=p.mirror, assembly=p.assembly,
+                              place=p.place) for p in plates[0][1]])]
+        self.build(self.spec(rebuilt))
+        after = self.volumes_in_world()["kit"]
+        shift = tuple(a - b for a, b in zip(after[0][1], before[0][1]))
+        for (_, lo, hi), (_, lo0, hi0) in zip(after, before):
+            self.assertTrue(close(tuple(a - b for a, b in zip(lo, lo0)), shift, 1e-3))
+            self.assertTrue(close(tuple(a - b for a, b in zip(hi, hi0)), shift, 1e-3))
+
     def test_assemblies_with_the_same_name_stay_apart_on_import(self):
         plates = self.kit()
         plates.append(build3mf.PlateSpec("q", 5, [
