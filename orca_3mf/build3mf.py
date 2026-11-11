@@ -990,8 +990,7 @@ def read_layout(path, finder, stl_cache=None):
                     found_first = sorted(models, key=lambda m: finder.find(m.source, project_dir)[0] is None)
                     sources = {}
                     for part in found_first:
-                        sources[part.id] = _find_source(project, part, finder, project_dir, stl_cache,
-                                                        (_NameHint(obj.name), mine, found))
+                        sources[part.id] = _find_source(project, part, finder, project_dir, stl_cache, (mine, found))
                         _count(mine, sources[part.id][0])
                     for part in models:
                         try:
@@ -1018,18 +1017,6 @@ def read_layout(path, finder, stl_cache=None):
         return out, problems
     finally:
         project.close()
-
-
-class _NameHint:
-    """A counter for _find_source's prefer: how many words of an object's name ("tight tight") are folder names in a
-    folder's path (".../buttons/tight")."""
-
-    def __init__(self, name):
-        self.words = {w for w in re.split(r"[^\w]+", name.lower()) if w}
-
-    def get(self, folder, default=0):
-        names = {p.lower() for p in re.split(r"[\\/]+", folder) if p}
-        return len(self.words & names) or default
 
 
 def _count(counter, path):
@@ -1146,8 +1133,8 @@ def _find_source(project, part, finder, project_dir, stl_cache, prefer=()):
         if best > 0:
             picked = [(c, f) for c, f in same if counter.get(os.path.dirname(c), 0) == best]
             if len(picked) == 1:
-                return picked[0][0], "%d files named %s have this shape; took %s" \
-                    % (len(same), name, os.path.basename(os.path.dirname(picked[0][0])) + "/" + name), picked[0][1]
+                return picked[0][0], "%d files named %s have this shape; took the one in the folder of the " \
+                    "other parts" % (len(same), name), picked[0][1]
     return same[0][0], "%d files named %s have this shape; took the first" % (len(same), name), same[0][1]
 
 
