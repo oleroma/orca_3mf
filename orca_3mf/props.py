@@ -16,13 +16,26 @@ def _seam_poll(self, obj):
     return obj.type in {'CURVE', 'MESH'}
 
 
+def _clear_mark(self, context):
+    self.mark = 'NONE'
+    self.mark_note = ""
+
+
+MARKS = (('NONE', "None", "Nothing to check"),
+         ('WARNING', "Check", "Works, but check it"),
+         ('ERROR', "Not sure", "Not sure, so nothing was taken"))
+
+
 class OrcaPart(bpy.types.PropertyGroup):
     use: bpy.props.BoolProperty(name="Build", default=True, description="Put this part on its plate")
     name: bpy.props.StringProperty(
         name="Name", description="Name of the part in Orca's object list. Empty: the STL's file name")
     path: bpy.props.StringProperty(
         name="STL", description="The STL file, below the STL root and the project's and plate's STL folders. "
-                                "Use / between folders")
+                                "Use / between folders", update=_clear_mark)
+    mark: bpy.props.EnumProperty(name="Mark", items=MARKS, default='NONE',
+                                 description="What the last Import or Build found about this part")
+    mark_note: bpy.props.StringProperty(name="Why", description="Why the part is marked")
     up: bpy.props.FloatVectorProperty(
         name="Up", size=3, subtype='XYZ', default=(0.0, 0.0, 1.0),
         description="The direction of the part (in Blender, as exported) that points up on the build plate. "
@@ -70,6 +83,17 @@ class OrcaProject(bpy.types.PropertyGroup):
         description="An Orca project (.3mf) whose printer, process and filament settings a new project starts "
                     "with; the bed size comes from it too. Once the project exists, its own settings are kept. "
                     "A relative path (../printer.3mf) starts at the .blend file's folder")
+    plate_paths: bpy.props.BoolProperty(
+        name="Plate names are folders",
+        description="Read each plate's name as the folder of its parts (tight/cap_loose). When Orca keeps only a "
+                    "part's file name, Import takes the file from that folder or the nearest folder above it, and "
+                    "Relink names the plate after the folder it finds the parts in. Off: plate names are only "
+                    "names, and parts are found by their stored paths alone")
+    overwrite: bpy.props.BoolProperty(
+        name="Overwrite",
+        description="On: Build writes into the project's 3MF itself. Off: the 3MF is never changed once it "
+                    "exists; each Build writes the next numbered file into the 3mf_builds folder next to it "
+                    "(project_001.3mf, project_002.3mf, ...)")
     plates: bpy.props.CollectionProperty(type=OrcaPlate)
     plate_index: bpy.props.IntProperty()
 
@@ -142,6 +166,44 @@ def stl_root(scene):
     return absolute("//")
 
 
+def set_mark(part, level, note):
+    """Marks a part (MARKS) with the reason; a red mark is not lowered to yellow."""
+    if part.mark == 'ERROR' and level == 'WARNING':
+        return
+    part.mark = level
+    part.mark_note = note
+
+
+def part_mark(scene, project, plate, part):
+    """(level, why) of a part as the tab shows it: red when its STL is missing or the last Import or Build was not
+    sure; yellow when that found something to check, or when its STL is outside the plate's folder and the folders
+    above it, with "Plate names are folders" on (Import would not find it again from a file name)."""
+    path = part_path(scene, project, plate, part) if part.path else ""
+    if not path or not os.path.isfile(path):
+        return 'ERROR', part.mark_note or ("no STL file" if not path else "STL not found")
+    if part.mark != 'NONE':
+        return part.mark, part.mark_note
+    if project.plate_paths and not in_plate_folders(scene, project, plate, path):
+        return 'WARNING', ("not in this plate's folder or the folders above it: Import can't find it again when "
+                           "Orca keeps only its file name")
+    return 'NONE', ""
+
+
+def in_plate_folders(scene, project, plate, path):
+    """Whether path is in the plate's folder or a folder above it, up to the project's STL folder."""
+    rel = paths.relative_form(os.path.dirname(path), plate_folder(scene, project, plate)).replace("\\", "/")
+    if rel != "." and any(p != ".." for p in rel.split("/")):
+        return False
+    top = os.path.normcase(os.path.abspath(project_stl_folder(scene, project)))
+    folder = os.path.normcase(os.path.abspath(os.path.dirname(path)))
+    return folder == top or folder.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def project_stl_folder(scene, project):
+    """The project's STL folder: the STL root joined with the project's STL folder."""
+    return paths.join(stl_root(scene), project.stl_folder)
+
+
 def plate_folder(scene, project, plate):
     return paths.join(stl_root(scene), project.stl_folder, plate.stl_folder if plate else "")
 
@@ -176,6 +238,16 @@ def project_root(scene):
 def project_path(scene, project):
     name = project.name if project.name.lower().endswith(".3mf") else project.name + ".3mf"
     return paths.join(project_root(scene), project.folder, name)
+
+
+def build_path(scene, project):
+    """Where Build writes the project: the 3MF itself while it does not exist or Overwrite is on, else its next
+    numbered build in 3mf_builds."""
+    from . import build3mf
+    path = project_path(scene, project)
+    if project.overwrite or not os.path.isfile(path):
+        return path
+    return build3mf.next_build_path(path)
 
 
 # --------------------------------------------------------------------------

@@ -118,6 +118,7 @@ class OrcaTabTest(unittest.TestCase):
         project.folder = "GripV"
         project.stl_folder = "GripV"
         project.template = self.template
+        project.overwrite = True  # rebuild in place; test_builds_are_numbered_unless_overwrite_is_on checks off
         for _ in range(plates - 1):
             list_action('PLATE', 'ADD')
         return project
@@ -270,10 +271,13 @@ class OrcaTabTest(unittest.TestCase):
         self.add_part(up=(1, 0, 0), angle=math.radians(90), copies=2)
         self.build()
         settings = bpy.context.scene.orca_reload
+        settings.projects.remove(0)  # a 3MF not in the tab yet: a new project
         self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
         imported = settings.projects[settings.project_index]
         self.assertEqual((imported.name, imported.folder, imported.stl_folder), ("GripV_parts.3mf", "GripV",
                                                                                "GripV/parts"))
+        self.assertFalse(imported.overwrite)
+        imported.overwrite = True
         self.assertEqual(len(imported.plates), 2)
         part = imported.plates[1].parts[0]
         self.assertEqual((part.name, part.path, part.copies), ("box.stl", "box.stl", 2))
@@ -299,8 +303,14 @@ class OrcaTabTest(unittest.TestCase):
         project.plates[0].parts[3].path = "GripV/parts/box.stl"
         plate = project.plates[0]
         self.assertEqual(len(operators.missing_parts(scene, project, plate)), 3)
-        result = bpy.ops.orca_reload.relink(directory=os.path.join(root, "buttons", "tight", "cap_loose") + os.sep)
-        self.assertEqual(result, {'FINISHED'})
+        folder = os.path.join(root, "buttons", "tight", "cap_loose") + os.sep
+        # "Plate names are folders" off: the picked folder only, and the plate keeps its name
+        self.assertEqual(bpy.ops.orca_reload.relink(directory=folder), {'FINISHED'})
+        self.assertEqual(plate.name, "Plate 1")
+        self.assertEqual(len(operators.missing_parts(scene, project, plate)), 2)
+        # On: the folders above it too, and the plate is named after the folder
+        project.plate_paths = True
+        self.assertEqual(bpy.ops.orca_reload.relink(directory=folder), {'FINISHED'})
         self.assertEqual(plate.name, "tight/cap_loose")
         from bl_ext.orca_test.orca_3mf import props
         got = [os.path.normpath(props.part_path(scene, project, plate, p)) for p in plate.parts]
@@ -308,6 +318,53 @@ class OrcaTabTest(unittest.TestCase):
                                    os.path.join(root, "buttons", "tight", "cap_loose", "dpad.stl")])
         self.assertEqual(got[3], self.stl)
         self.assertEqual([p.path for p in operators.missing_parts(scene, project, plate)], ["missing.stl"])
+        self.assertEqual([props.part_mark(scene, project, plate, p)[0] for p in plate.parts],
+                         ['NONE', 'NONE', 'ERROR', 'WARNING'])  # box.stl is not in tight/cap_loose or above it
+
+    def test_builds_are_numbered_unless_overwrite_is_on(self):
+        project = self.add_project()
+        project.overwrite = False
+        self.add_part()
+        self.assertIn("(new)", self.build())  # the 3MF does not exist yet: written as the project itself
+        before = os.path.getmtime(self.out())
+        builds = os.path.join(os.path.dirname(self.out()), "3mf_builds")
+        self.assertIn("3mf_builds/GripV_parts_001.3mf (new build of", self.build().replace(os.sep, "/"))
+        self.build()
+        self.assertEqual(sorted(os.listdir(builds)), ["GripV_parts_001.3mf", "GripV_parts_002.3mf"])
+        self.assertEqual(os.path.getmtime(self.out()), before)  # never touched
+        # Turned on (the confirmation shows only when clicked): written in place again
+        self.assertEqual(bpy.ops.orca_reload.overwrite(), {'FINISHED'})
+        self.assertTrue(project.overwrite)
+        self.assertIn("(rebuilt)", self.build())
+
+    def test_reimport_keeps_links_and_marks_what_is_not_sure(self):
+        scene = bpy.context.scene
+        settings = scene.orca_reload
+        project = self.add_project()
+        part = self.add_part()
+        part.seam = None
+        self.add_part(path="parts/lid.stl")
+        fixtures.write_stl(os.path.join(self.dir, "stl", "GripV", "parts", "lid.stl"), fixtures.box((4, 4, 4)))
+        project.plates[0].parts[1].use = False  # only the tab knows this
+        self.build()
+        # Orca keeps only the file names
+        with zipfile.ZipFile(self.out()) as z:
+            entries = {n: z.read(n) for n in z.namelist()}
+        text = entries["Metadata/model_settings.config"].decode()
+        entries["Metadata/model_settings.config"] = re.sub(r'(key="source_file" value=")[^"]*/', r"\1",
+                                                           text).encode()
+        with zipfile.ZipFile(self.out(), "w") as z:
+            for n, data in entries.items():
+                z.writestr(n, data)
+        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
+        self.assertEqual(len(settings.projects), 1)  # the same project, imported again
+        plate = settings.projects[0].plates[0]
+        self.assertEqual([p.path for p in plate.parts], ["box.stl"])  # its link kept; lid was not built
+        # A part new to the plate gets Orca's defaults: marked yellow by the build
+        self.add_part(path="lid.stl")  # the imported plate's folder is GripV/parts
+        self.build()
+        self.assertEqual([p.mark for p in plate.parts], ['NONE', 'WARNING'])
+        self.assertIn("new part", plate.parts[1].mark_note)
 
     def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
         from bl_ext.orca_test.orca_3mf import props
@@ -323,6 +380,7 @@ class OrcaTabTest(unittest.TestCase):
         bpy.ops.wm.save_as_mainfile(filepath=os.path.join(self.dir, "blender", "grip.blend"))
         self.addCleanup(bpy.ops.wm.read_homefile, use_empty=True)
         settings.stl_root = "../stl"
+        settings.projects.remove(0)  # a 3MF not in the tab yet: a new project
         # Found, but outside the STL root: saved from the plate's folder, not as a full path
         self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
         imported = settings.projects[settings.project_index]

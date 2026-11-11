@@ -225,14 +225,60 @@ class BuildTest(unittest.TestCase):
         for path in stl.values():
             text = text.replace('value="%s"' % path, 'value="%s"' % os.path.basename(path))
         self.replace_entry(reload3mf.MODEL_SETTINGS, text)
-        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]), plate_paths=True)
         got = {name: {p.name: p.stl for p in parts} for name, parts in plates}
         self.assertEqual(got["tight/cap_loose"], {"button.stl": stl["tight"], "dpad.stl": stl["tight", "cap_loose"]})
         self.assertEqual(got["loose/cap_tight"], {"button.stl": stl["loose"], "dpad.stl": stl["loose", "cap_tight"]})
         # A plate not named after a folder: nothing is guessed, and the note says how to fix it
         self.assertEqual(got["Plate 3"], {"button.stl": None, "dpad.stl": None})
         note = next(p.note for name, parts in plates if name == "Plate 3" for p in parts)
-        self.assertIn("name the plate after its folder", note)
+        self.assertIn("no folder is named like the plate", note)
+
+    def names_only(self, plates):
+        """Builds the plates, then leaves Orca's way of storing only the file names."""
+        self.build(self.spec(plates))
+        text = self.settings_xml()
+        for plate in plates:
+            for part in plate.parts:
+                text = text.replace('value="%s"' % part.stl, 'value="%s"' % os.path.basename(part.stl))
+        self.replace_entry(reload3mf.MODEL_SETTINGS, text)
+
+    def test_plate_folders_take_only_what_is_sure(self):
+        root = os.path.join(self.dir, "stl")
+        dpad = self.write("dpad", (12, 8, 3), (0, 0, 1.5), "stl/buttons/tight/cap_loose")
+        self.write("dpad", (12, 8, 3), (0, 0, 1.5), "stl/dpads/tight/cap_loose")  # a second tight/cap_loose
+        self.write("knob", (5, 5, 5), (0, 0, 2.5), "stl/buttons/tight")
+        knob = self.write("knob", (5, 5, 5), (0, 0, 2.5), "stl/buttons/tight/cap_loose")  # knob.stl at 2 levels
+        stray = self.write("lid", (5, 5, 5), (0, 0, 2.5), "stl")  # an old copy above the project's folder
+        self.names_only([build3mf.PlateSpec("tight/cap_loose", 5, [build3mf.PartSpec("dpad.stl", dpad),
+                                                                   build3mf.PartSpec("knob.stl", knob),
+                                                                   build3mf.PartSpec("lid.stl", stray)])])
+        finder = reload3mf.SourceFinder([root])
+        # Two folders end in tight/cap_loose: nothing is taken, and a longer name is offered
+        plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True)
+        notes = {p.name: (p.stl, p.note) for p in plates[0][1]}
+        self.assertIsNone(notes["dpad.stl"][0])
+        self.assertIn("matches 2 folders", notes["dpad.stl"][1])
+        self.assertIn("buttons/tight/cap_loose", notes["dpad.stl"][1])
+        # Below the project's folder (stl/buttons) the name is unique; knob.stl is in two of its folders
+        plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True, top=os.path.join(root, "buttons"))
+        notes = {p.name: (p.stl, p.note) for p in plates[0][1]}
+        self.assertEqual(notes["dpad.stl"][0], dpad)
+        self.assertIsNone(notes["knob.stl"][0])
+        self.assertIn("in 2 of the plate's folders", notes["knob.stl"][1])
+        # The old lid.stl lies above the project's folder: never looked at
+        self.assertIsNone(notes["lid.stl"][0])
+        # Without the switch, plate names are only names
+        plates, _ = build3mf.read_layout(self.out, finder, top=os.path.join(root, "buttons"))
+        self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])
+
+    def test_reimport_keeps_the_tab_links(self):
+        knob = self.write("knob", (5, 5, 5), (0, 0, 2.5), "somewhere/deep")
+        self.names_only([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", knob)])])
+        links = {("p", "knob.stl"): knob}
+        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]),
+                                         known=lambda plate, name: links.get((plate, name)))
+        self.assertEqual(plates[0][1][0].stl, knob)
 
     def test_a_file_name_alone_is_never_taken(self):
         # Only one knob.stl below the root, but Orca kept just its name and the plate names no folder: not guessed
@@ -358,11 +404,13 @@ class BuildTest(unittest.TestCase):
         lo, hi = placed["c.stl"]
         self.assertAlmostEqual((lo[0] + hi[0]) / 2, 180 * 1.2, places=4)  # second plate, 180 mm bed
 
-    def add_object_setting(self, source, key, value):
-        """Adds an object-level metadata key (in the <object> block) to the part whose source_file is `source`,
-        as if it had been changed in Orca."""
+    def add_object_setting(self, source, key, value, nth=0):
+        """Adds an object-level metadata key (in the <object> block) to the part whose source_file is `source`
+        (the nth such part), as if it had been changed in Orca."""
         text = self.settings_xml()
-        si = text.index('source_file" value="%s"' % source)
+        si = -1
+        for _ in range(nth + 1):
+            si = text.index('source_file" value="%s"' % source, si + 1)
         oi = text.rindex('<object id=', 0, si)
         ni = text.index('key="name"', oi, si)
         ei = text.index('/>', ni) + 2
@@ -404,16 +452,43 @@ class BuildTest(unittest.TestCase):
                                                                     text.index('plater_name" value="first"'))]
         self.assertIn('curr_bed_type" value="Textured PEI Plate"', block)
 
-    def test_same_named_parts_keep_settings_by_shape(self):
+    def test_same_named_parts_that_differ_keep_nothing(self):
+        # Two knob.stl objects named the same on one plate with different settings: not sure which is which
         tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
         loose = self.write("knob", (10.4, 10.4, 10), (0, 0, 5), "loose")
         self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", tight),
                                                           build3mf.PartSpec("knob.stl", loose)])]))
         self.add_object_setting(tight, "wall_loops", "6")
-        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", loose),
-                                                          build3mf.PartSpec("knob.stl", tight)])]))
-        self.assertIn('wall_loops" value="6"', self.object_block(tight))
+        parts = [build3mf.PartSpec("knob.stl", loose), build3mf.PartSpec("knob.stl", tight)]
+        self.build(self.spec([build3mf.PlateSpec("p", 5, parts)]))
+        self.assertNotIn('wall_loops', self.object_block(tight))
         self.assertNotIn('wall_loops', self.object_block(loose))
+        self.assertEqual([p.mark for p in parts], ['ERROR', 'ERROR'])
+        self.assertIn("differ", parts[0].mark_note)
+
+    def test_same_named_parts_with_the_same_settings_keep_them(self):
+        # An object split with "Set as individual object": the same settings, whichever is taken
+        a = self.stls["a"]
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a, copies=1),
+                                                          build3mf.PartSpec("a.stl", a, copies=1)])]))
+        self.add_object_setting(a, "wall_loops", "6")
+        self.add_object_setting(a, "wall_loops", "6", nth=1)
+        parts = [build3mf.PartSpec("a.stl", a), build3mf.PartSpec("a.stl", a)]
+        self.build(self.spec([build3mf.PlateSpec("p", 5, parts)]))
+        self.assertEqual(self.settings_xml().count('wall_loops" value="6"'), 2)
+        self.assertEqual([p.mark for p in parts], ["", ""])
+
+    def test_settings_never_come_from_another_plate(self):
+        # The same knob on two plates; the plates swap names: each part keeps its own plate's settings only
+        knob = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
+        self.build(self.spec([build3mf.PlateSpec("one", 5, [build3mf.PartSpec("knob.stl", knob)]),
+                              build3mf.PlateSpec("two", 5, [build3mf.PartSpec("knob.stl", knob)])]))
+        self.add_object_setting(knob, "wall_loops", "6")  # the knob on plate "one"
+        parts = [build3mf.PartSpec("knob.stl", knob)]
+        self.build(self.spec([build3mf.PlateSpec("two", 5, parts), build3mf.PlateSpec("three", 5, [
+            build3mf.PartSpec("knob.stl", knob)])]))
+        self.assertNotIn('wall_loops', self.settings_xml())
+        self.assertEqual(parts[0].mark, "")
 
     def test_part_taller_than_printable_height_is_reported(self):
         make_template(self.template, printable_height="30")

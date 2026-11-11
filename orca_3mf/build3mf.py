@@ -81,6 +81,8 @@ class PartSpec:
         self.copies = max(int(copies), 1)
         self.seam = seam
         self.mirror = bool(mirror)
+        self.mark = ""  # set by Build: 'WARNING' or 'ERROR' when its Orca settings were not kept
+        self.mark_note = ""
 
 
 class PlateSpec:
@@ -91,11 +93,12 @@ class PlateSpec:
 
 
 class ProjectSpec:
-    """A project: the 3MF file to write (absolute path), its plates, a template project for the settings of a new
+    """A project: its 3MF file (absolute path; Build writes out_path, the same file unless given), its plates, a template project for the settings of a new
     project, the bed size used when no settings come with it, and how the report shows a path (default: as it is)."""
 
-    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None):
+    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None, out_path=None):
         self.path = path
+        self.out_path = out_path or path  # where Build writes: the project itself, or a numbered build of it
         self.shown = shown or (lambda p: p)
         self.plates = list(plates)
         self.template = template
@@ -117,11 +120,27 @@ class _OldObject:
         self.index = index  # 1-based position in the old model
 
 
-def _same_source(a, b):
-    """Whether two source_file paths point at the same STL (absolute, or at least the same file name)."""
-    a = os.path.normcase(a.replace("\\", "/"))
-    b = os.path.normcase(b.replace("\\", "/"))
-    return a == b or os.path.basename(a) == os.path.basename(b)
+def next_build_path(path, folder="3mf_builds"):
+    """The next numbered build of a project: <its folder>/3mf_builds/<name>_001.3mf, _002, ... after the highest
+    number there."""
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(path)), folder)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    pattern = re.compile(re.escape(stem) + r"_(\d+)\.3mf$", re.IGNORECASE)
+    numbers = [int(m.group(1)) for m in map(pattern.match, os.listdir(out_dir) if os.path.isdir(out_dir) else ())
+               if m]
+    return os.path.join(out_dir, "%s_%03d.3mf" % (stem, max(numbers, default=0) + 1))
+
+
+def plate_key(name, position):
+    """How a plate is told apart: its name, or its position (from 0) when it has none."""
+    return name if name else "#%d" % position
+
+
+def _settings_key(obj):
+    """What two old objects must share to give the same Orca settings."""
+    part = obj.part.meta if obj.part is not None else {}
+    return (tuple(sorted(obj.meta)), tuple(sorted((k, v) for k, v in part.items() if k not in PART_KEYS)),
+            tuple(sorted(tuple(sorted(p.meta.items())) for p in obj.extras)))
 
 
 class Base:
@@ -189,7 +208,7 @@ class Base:
             name = pmeta.get("plater_name") or ""
             self.plates.append((name, [(k, v) for k, v in pmeta.items() if k not in PLATE_KEYS]))
             try:
-                plate_names[int(pmeta["plater_id"])] = name
+                plate_names[int(pmeta["plater_id"])] = plate_key(name, int(pmeta["plater_id"]) - 1)
             except (KeyError, ValueError):
                 pass
         model_order = {oid: i + 1 for i, oid in enumerate(getattr(project, "model_order", ()))}
@@ -206,45 +225,41 @@ class Base:
                                            model_order.get(o.get("id"), 0)))
 
     def take_plate(self, name, position):
-        """The old plate settings for `name` (once each), else by position (as before), else a fresh plate."""
+        """The old plate settings for `name` (once each); a plate without a name takes the unnamed old plate at its
+        position; else a fresh plate."""
         for i in range(len(self.plates)):
-            if i not in self._plate_taken and self.plates[i][0] == name:
+            if i not in self._plate_taken and name and self.plates[i][0] == name:
                 self._plate_taken.add(i)
                 return self.plates[i][1]
-        if 0 <= position < len(self.plates) and position not in self._plate_taken:
+        if (not name and 0 <= position < len(self.plates) and position not in self._plate_taken
+                and not self.plates[position][0]):
             self._plate_taken.add(position)
             return self.plates[position][1]
         return [("locked", "false")]
 
-    def take_part(self, spec, plate_name, new_mesh):
-        """The old object that best matches the part: by shape, then source file, then plate, then name."""
-        center = new_mesh.center()
-        best, best_score = None, -1
-        for o in self.objects:
-            score = 0
-            old_mesh = None
-            if o.part is not None:
-                if o.part.source and (_same_source(o.part.source, spec.source) or
-                                      _same_source(o.part.source, spec.stl)):
-                    score += 4
-                try:
-                    old_mesh = self.project.old_mesh(o.part)
-                except ReloadError:
-                    old_mesh = None
-            if old_mesh is not None:
-                shift = tuple(a - b for a, b in zip(old_mesh.center(), center))
-                if reload3mf.same_shape(old_mesh, new_mesh, (0.0, 0.0, 0.0), shift):
-                    score += 8
-            if plate_name and o.plates and plate_name in o.plates:
-                score += 2
-            if o.name == spec.name:
-                score += 1
-            if score > best_score:
-                best, best_score = o, score
-        if best is None or best_score <= 0:
-            return None
-        self.objects.remove(best)
-        return best
+    def take_part(self, spec, plate_name, plate_no):
+        """(old object or None, mark, note): the old object whose Orca settings the part keeps. Exact matches only,
+        never by shape or order and never from another plate: an object on the same plate (by name; a plate without
+        a name by its position) with the same STL file name and the same object name. Several such objects are
+        taken only when their settings are the same (an object split with "Set as individual object"); mark is ""
+        when kept, else 'WARNING' (a new part) or 'ERROR' (not sure)."""
+        key = plate_key(plate_name, plate_no)
+        file_name = os.path.basename((spec.source or spec.stl).replace("\\", "/")).lower()
+        on_plate = [o for o in self.objects if key in o.plates and o.part is not None
+                    and os.path.basename(o.part.source.replace("\\", "/")).lower() == file_name]
+        same = [o for o in on_plate if o.name == spec.name]
+        if not same:
+            if on_plate:
+                return None, 'ERROR', ("Orca settings not kept: %s is on this plate under another name (%s)"
+                                       % (file_name, ", ".join(sorted({o.name for o in on_plate}))))
+            if self.project is not None:
+                return None, 'WARNING', "new part: Orca's default settings"
+            return None, "", ""
+        if len(same) > 1 and len({_settings_key(o) for o in same}) > 1:
+            return None, 'ERROR', ("Orca settings not kept: %d objects named %s on this plate differ, rename them "
+                                   "in Orca" % (len(same), spec.name))
+        self.objects.remove(same[0])
+        return same[0], "", ""
 
     def settings(self):
         if SETTINGS not in self.files:
@@ -311,6 +326,8 @@ class _Object:
         self.id = None  # the object's <object id> in the root model
         self.sub_id = None  # the main volume's sub-model <object id>
         self.extra_volumes = []  # _ExtraVolume list (modifiers, negatives, blockers carried over)
+        self.mark = ""  # 'WARNING' or 'ERROR' when its Orca settings were not kept, with mark_note saying why
+        self.mark_note = ""
 
 
 class _ExtraVolume:
@@ -358,11 +375,12 @@ def _carry_extras(base, old_obj, anchor):
     return out
 
 
-def _prepare(obj, base, stl_cache, plate_name):
+def _prepare(obj, base, stl_cache, plate_name, plate_no=0):
     spec = obj.spec
     stl, _ = _load(spec, stl_cache)  # degenerate triangles are dropped, as Orca's own import does
     seam = spec.seam(spec.stl, stl) if spec.seam else None
-    obj.old = base.take_part(spec, plate_name, stl)
+    obj.old, obj.mark, obj.mark_note = base.take_part(spec, plate_name, plate_no)
+    spec.mark, spec.mark_note = obj.mark, obj.mark_note  # for the tab
     obj.extra_volumes = []
     if obj.old is not None and obj.old.extras and obj.old.part is not None:
         try:
@@ -419,7 +437,7 @@ def plan(spec, base, stl_cache=None):
         for part in plate.parts:
             obj = _Object(part, plate_no)
             try:
-                _prepare(obj, base, stl_cache, plate.name)
+                _prepare(obj, base, stl_cache, plate.name, plate_no)
             except (ReloadError, OSError, ValueError) as e:
                 problems.append("plate %d, %s: %s" % (plate_no + 1, part.name, e))
                 continue
@@ -698,7 +716,10 @@ def build(spec, stl_cache=None, dry_run=False):
     base = Base(spec.path, spec.template)
     try:
         objects, problems, bed = plan(spec, base, stl_cache)
-        lines = ["%s (%s)" % (spec.shown(spec.path), "new" if created else "rebuilt")]
+        if os.path.normcase(os.path.abspath(spec.out_path)) == os.path.normcase(os.path.abspath(spec.path)):
+            lines = ["%s (%s)" % (spec.shown(spec.path), "new" if created else "rebuilt")]
+        else:
+            lines = ["%s (new build of %s)" % (spec.shown(spec.out_path), spec.shown(spec.path))]
         if base.settings_from:
             source = "the project" if os.path.normcase(os.path.abspath(base.settings_from)) == \
                 os.path.normcase(os.path.abspath(spec.path)) else spec.shown(base.settings_from)
@@ -733,6 +754,8 @@ def build(spec, stl_cache=None, dry_run=False):
                     text += "  x%d" % len(obj.transforms)
                 if obj.old is not None and any(k != "extruder" for k, _ in obj.old.meta):
                     text += "  (kept its Orca settings)"
+                if obj.mark:
+                    text += "  (%s)" % obj.mark_note
                 if obj.notes:
                     text += "  " + "; ".join(obj.notes)
                 lines.append(text)
@@ -745,7 +768,7 @@ def build(spec, stl_cache=None, dry_run=False):
             lines.append("  no parts, not written")
             return lines, False
         if not dry_run:
-            write(spec, base, objects, spec.path)
+            write(spec, base, objects, spec.out_path)
         return lines, not dry_run
     finally:
         base.close()
@@ -767,11 +790,13 @@ class ImportedPart:
         self.mirror = mirror
 
 
-def read_layout(path, finder, stl_cache=None):
+def read_layout(path, finder, stl_cache=None, plate_paths=False, top=None, known=None):
     """Plates of an existing project: [(plate name, [ImportedPart])], and problem lines.
 
     finder: reload3mf.SourceFinder for the STLs. A file name found in several folders (a part exported with
-    several tolerances) is taken from the folder the plate is named after (_find_source)."""
+    several tolerances) is taken from the folder the plate is named after when plate_paths is on (_find_source);
+    plate_paths off: plate names are only names. top: the project's STL folder, where looking up stops.
+    known(plate name, file name): the STL the tab already links, or None (a re-import)."""
     stl_cache = {} if stl_cache is None else stl_cache
     project = reload3mf.Project(path)
     problems = []
@@ -811,7 +836,8 @@ def read_layout(path, finder, stl_cache=None):
                     rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
                 up, angle = layout.orientation_from_matrix(rows)
                 up = tuple(0.0 if abs(c) < 1e-9 else c for c in up)
-                stl, note = _find_source(part, finder, project_dir, name, folders)
+                stl, note = _find_source(part, finder, project_dir, name if plate_paths else "", folders, top,
+                                         (lambda f, n=name: known(n, f)) if known else None)
                 angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
                 imported = ImportedPart(obj.name, part.source, up, angle, 1, stl, note, mirror=mirror)
                 seen[oid] = imported
@@ -822,11 +848,15 @@ def read_layout(path, finder, stl_cache=None):
         project.close()
 
 
-def _find_source(part, finder, project_dir, plate_name, folders):
-    """(STL path or None, note). Only paths, never a file found by its name alone (one part exported with several
-    tolerances has the same file name in each folder): the stored path; else the plate's name read as a folder (a
-    plate named "tight/cap_loose" takes the file from the folder below the STL root whose path ends in that name, or
-    from the nearest folder above it); else the stored path's trailing folders below the STL root."""
+def _find_source(part, finder, project_dir, plate_name, folders, top=None, known=None):
+    """(STL path or None, note). Only exact paths, never a file found by its name alone (one part exported with
+    several tolerances has the same file name in each folder), in this order:
+    1. the stored path (absolute, or from the 3MF's folder), when the file is there;
+    2. known(file name): the link the tab already had for this part (a re-import), or None;
+    3. plate_name read as a folder (only when given): the one folder below the STL root whose path ends in it, and
+       the folders above it up to top (the project's STL folder; default the STL root). The file must be in exactly
+       one of them; two folders named like the plate, or the file in two of them, take nothing;
+    4. the stored path's trailing folders below the STL root (at least one folder)."""
     stored = part.source
     if stored:
         direct = stored if os.path.isabs(stored) else os.path.join(project_dir, stored)
@@ -835,37 +865,65 @@ def _find_source(part, finder, project_dir, plate_name, folders):
     file_name = os.path.basename(stored.replace("\\", "/"))
     if not file_name:
         return None, "no STL path stored"
-    found = set()
-    for folder in plate_folders(plate_name, finder.search_dirs, folders):
-        hit = find_up(file_name, folder, finder.search_dirs)
-        if hit:
-            found.add(hit)
-    if len(found) == 1:
-        return found.pop(), "from the plate's folder %s" % plate_name
-    if found:
-        return None, "%d folders below the STL root end in the plate's name %s" % (len(found), plate_name)
+    if known is not None:
+        path = known(file_name)
+        if path:
+            return path, "kept the tab's link"
+    plate_note = ""
+    if plate_name:
+        tops = [top] if top else finder.search_dirs
+        leaves = [d for d in plate_folders(plate_name, finder.search_dirs, folders)
+                  if any(_inside(d, t) for t in tops)]
+        if len(leaves) > 1:
+            longer = sorted(plate_name_for(d, finder.search_dirs, folders) for d in leaves)
+            return None, ("the plate name %s matches %d folders: use a longer name (%s)"
+                          % (plate_name, len(leaves), " or ".join(longer)))
+        if leaves:
+            hits = find_all_up(file_name, leaves[0], tops)
+            if len(hits) == 1:
+                return hits[0], "from the plate's folders"
+            if hits:
+                return None, "%s is in %d of the plate's folders" % (file_name, len(hits))
+            plate_note = "%s is not in the plate's folders" % file_name
+        else:
+            plate_note = "no folder is named like the plate %s" % plate_name
     path, _ = finder.find(stored, project_dir, by_name=False)
     if path is not None:
         return path, ""
     if "/" in stored.replace("\\", "/"):
         return None, "not found"
-    return None, ("Orca kept only the name %s: name the plate after its folder (like tight/cap_loose), or use "
-                  "Relink" % file_name)
+    if plate_note:
+        return None, "Orca kept only the name %s, and %s: use Relink" % (file_name, plate_note)
+    return None, "Orca kept only the name %s: use Relink" % file_name
 
 
-def find_up(file_name, folder, roots):
-    """file_name in folder, else in the nearest folder above it, stopping at the root it is below (any folder of
-    roots); None when not found."""
+def _inside(path, folder):
+    path = os.path.normcase(os.path.abspath(path))
+    folder = os.path.normcase(os.path.abspath(folder))
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def find_all_up(file_name, folder, roots):
+    """Every file_name in folder and in the folders above it, up to the root it is below (any folder of roots,
+    itself included), nearest first. Never looks into a sibling."""
     tops = {os.path.normcase(os.path.abspath(r)) for r in roots}
     folder = os.path.abspath(folder)
+    hits = []
     while True:
         cand = os.path.join(folder, file_name)
         if os.path.isfile(cand):
-            return cand
+            hits.append(cand)
         up = os.path.dirname(folder)
         if os.path.normcase(folder) in tops or up == folder:
-            return None
+            return hits
         folder = up
+
+
+def find_up(file_name, folder, roots):
+    """file_name when it is in exactly one of folder and the folders above it up to the root (find_all_up), else
+    None."""
+    hits = find_all_up(file_name, folder, roots)
+    return hits[0] if len(hits) == 1 else None
 
 
 def _split(path):

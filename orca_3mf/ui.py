@@ -122,9 +122,10 @@ class ORCA_UL_parts(bpy.types.UIList):
         if item.copies > 1:
             tools.label(text="x%d" % item.copies)
         tools.label(text="", icon=ICONS['SEAM'] if item.seam else ICONS['BLANK'])
+        level, _ = props.part_mark(context.scene, project, plate, item)
         path = tools.row(align=True)
-        path.alert = bool(item.path) and not os.path.isfile(props.part_path(context.scene, project, plate, item))
-        path.prop(item, "path", text="", emboss=False, icon=ICONS['STL'])
+        path.alert = level == 'ERROR'
+        path.prop(item, "path", text="", emboss=False, icon='ERROR' if level != 'NONE' else ICONS['STL'])
 
 
 class ORCA_UL_log(bpy.types.UIList):
@@ -279,6 +280,13 @@ class VIEW3D_PT_orca_reload_projects(_OrcaPanel, bpy.types.Panel):
         sub.operator("orca_reload.browse_template", text="", icon=ICONS['DIR'])
         if exists:
             draw_label_row(box, "").label(text="The project exists: its own settings are kept")
+        row = draw_label_row(box, "")
+        row.prop(project, "plate_paths")
+        row = draw_label_row(box, "")
+        row.operator("orca_reload.overwrite", text="Overwrite the 3MF", icon='CHECKBOX_HLT' if project.overwrite
+                     else 'CHECKBOX_DEHLT', emboss=False)
+        if exists and not project.overwrite:
+            draw_label_row(box, "").label(text="Builds go to 3mf_builds, numbered")
 
 
 class VIEW3D_PT_orca_reload_plates(_OrcaPanel, bpy.types.Panel):
@@ -338,9 +346,14 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
             return
         box = layout.box()
         path = props.part_path(scene, project, plate, part) if part.path else ""
+        level, why = props.part_mark(scene, project, plate, part)
         row = box.row()
-        row.alert = bool(path) and not os.path.isfile(path)
+        row.alert = level == 'ERROR'
         row.label(text=props.shown(scene, path) or "No STL file", icon=ICONS['STL'])
+        if level != 'NONE':
+            row = box.row()
+            row.alert = level == 'ERROR'
+            row.label(text=why, icon='ERROR')
         row = draw_label_row(box, "STL:")
         row.prop(part, "path", text="")
         row.operator("orca_reload.browse_part", text="", icon=ICONS['DIR'])
