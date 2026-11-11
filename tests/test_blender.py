@@ -283,22 +283,6 @@ class OrcaTabTest(unittest.TestCase):
         report = self.build(settings.project_index)
         self.assertIn("(rebuilt)", report)
 
-    def test_assembly_imports_and_rebuilds(self):
-        self.add_project()
-        self.add_part(assembly="kit")
-        self.add_part(up=(1, 0, 0), assembly="kit", place=(30, 0, 0))
-        self.add_part()
-        report = self.build()
-        self.assertIn("kit  assembly of 2 parts", report)
-        settings = bpy.context.scene.orca_reload
-        self.assertEqual(bpy.ops.orca_reload.import_project(filepath=self.out()), {'FINISHED'})
-        parts = settings.projects[settings.project_index].plates[0].parts
-        self.assertEqual([(p.name, p.assembly) for p in parts], [("box.stl", "kit"), ("box.stl", "kit"),
-                                                                  ("box.stl", "")])
-        self.assertAlmostEqual(parts[1].place[0] - parts[0].place[0], 30.0, places=3)
-        self.assertEqual(tuple(round(c, 6) for c in parts[1].up), (1, 0, 0))
-        self.assertIn("kit  assembly of 2 parts", self.build(settings.project_index))
-
     def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene
@@ -549,7 +533,7 @@ class OrcaTabTest(unittest.TestCase):
                 return Layout()
 
         self.add_project(plates=2)
-        self.add_part(seam=curve_object("SeamTop", [(26, -40, 10), (34, -40, 10)]), copies=2, assembly="kit")
+        self.add_part(seam=curve_object("SeamTop", [(26, -40, 10), (34, -40, 10)]), copies=2)
         self.add_part(path="parts/missing.stl")
         self.build()
         bpy.context.window_manager.orca_reload_tips = True

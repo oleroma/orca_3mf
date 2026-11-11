@@ -292,8 +292,6 @@ class ORCA_OT_import_project(bpy.types.Operator):
                 part.angle = p.angle
                 part.copies = p.copies
                 part.mirror = p.mirror
-                part.assembly = p.assembly
-                part.place = p.place
                 if p.stl and p.note:
                     lines.append("  %s: %s" % (p.name, p.note))
         lines += ["  problem: %s" % p for p in problems]
@@ -343,8 +341,7 @@ def project_spec(context, project, painted):
                     seam = _seam_function(line, settings, painted, who)
             stl = props.part_path(scene, project, plate, part)
             parts.append(build3mf.PartSpec(part.label(), stl, part.up, part.angle, part.copies, seam,
-                                           mirror=part.mirror, source=_source_file(scene, project, stl),
-                                           assembly=part.assembly.strip(), place=part.place))
+                                           mirror=part.mirror, source=_source_file(scene, project, stl)))
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
     template = props.absolute(project.template)
     roots = props.roots(scene)
