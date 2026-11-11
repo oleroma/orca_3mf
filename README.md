@@ -70,7 +70,7 @@ Each part's place on the plate is set again by the nesting. Objects made of seve
 
 ## Import
 
-**Import** makes a project from an existing Orca project: its plates, and each part with its STL, Up, Turn and copies. The STLs are looked for below the STL root. When several files have the part's file name (Orca often keeps only the name, and the tight and loose versions share it), the one with the part's exact shape is taken. The common folders become the project's and plates' STL folders. Build then updates that same file.
+**Import** makes a project from an existing Orca project: its plates, and each part with its STL, Up, Turn and copies. The STLs are looked for below the STL root. When several files have the part's file name (Orca often keeps only the name, and the tight and loose versions share it), the plate's name says which: name the plate after its folder, like `tight/cap_loose`, and each part is taken from the folder below the STL root that ends in that name, or from the nearest folder above it. Nothing is guessed: a part that does not fit comes in red, to be picked in the tab. The common folders become the project's and plates' STL folders. Build then updates that same file.
 
 ## How it works
 
