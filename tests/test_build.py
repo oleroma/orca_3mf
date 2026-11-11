@@ -582,7 +582,7 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(problems, [])
         c = next(p for p in plates[0][1] if p.name == "c.stl")
         self.assertEqual(c.stl, self.stls["c"])  # the folder of the assembly's other part
-        self.assertIn("have this shape", c.note)
+        self.assertIn("have this shape; took stl/c.stl", c.note)
         rebuilt = [build3mf.PlateSpec("p", 5, [
             build3mf.PartSpec(p.name, p.stl, p.up, p.angle, p.copies, mirror=p.mirror, assembly=p.assembly,
                               place=p.place) for p in plates[0][1]])]
@@ -592,6 +592,19 @@ class BuildTest(unittest.TestCase):
         for (_, lo, hi), (_, lo0, hi0) in zip(after, before):
             self.assertTrue(close(tuple(a - b for a, b in zip(lo, lo0)), shift, 1e-3))
             self.assertTrue(close(tuple(a - b for a, b in zip(hi, hi0)), shift, 1e-3))
+
+    def test_assembly_name_picks_the_folder_of_a_part_with_a_lost_path(self):
+        # "tight tight" holds parts from the tight folder; loose has the same shape, and Orca kept only the file name
+        tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
+        loose = self.write("knob", (10, 10, 10), (0, 0, 5), "loose")
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [
+            build3mf.PartSpec("knob.stl", loose, assembly="tight tight"),
+            build3mf.PartSpec("c.stl", self.stls["c"], assembly="tight tight", place=(20, 0, 0))])]))
+        self.replace_entry(reload3mf.MODEL_SETTINGS,
+                           self.settings_xml().replace('value="%s"' % loose, 'value="knob.stl"'))
+        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        self.assertEqual(problems, [])
+        self.assertEqual(plates[0][1][0].stl, tight)
 
     def test_assemblies_with_the_same_name_stay_apart_on_import(self):
         plates = self.kit()
