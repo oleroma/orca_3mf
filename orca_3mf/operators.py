@@ -237,6 +237,61 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def missing_parts(scene, project, plate):
+    """The plate's parts whose STL file is not there."""
+    return [p for p in plate.parts if not p.path or not os.path.isfile(props.part_path(scene, project, plate, p))]
+
+
+class ORCA_OT_relink(bpy.types.Operator):
+    bl_idname = "orca_reload.relink"
+    bl_label = "Relink Missing Parts"
+    bl_description = ("Pick the folder of this plate's parts. Each part whose STL is missing is looked for by its "
+                      "file name in that folder, then in each folder above it up to the STL root, and nowhere else. "
+                      "The plate is named after the folder (tight/cap_loose), so Import finds its parts again even "
+                      "when Orca keeps only their file names")
+    bl_options = {'UNDO', 'INTERNAL'}
+    directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
+    filter_folder: bpy.props.BoolProperty(default=True, options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_plate(props.active_project(context.scene.orca_reload)) is not None
+
+    def invoke(self, context, event):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        folder = props.plate_folder(scene, project, props.active_plate(project))
+        if not os.path.isdir(folder):
+            folder = props.stl_root(scene)
+        self.directory = folder + os.sep if os.path.isdir(folder) else ""
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        plate = props.active_plate(project)
+        if plate is None or not self.directory:
+            return {'CANCELLED'}
+        folder = os.path.normpath(self.directory)
+        root = props.stl_root(scene)
+        roots = [root] if os.path.isdir(root) and paths.relative_to(folder, root) != folder else [folder]
+        missing = missing_parts(scene, project, plate)
+        found = 0
+        for part in missing:
+            file_name = os.path.basename(part.path.replace("\\", "/")) or part.name
+            hit = build3mf.find_up(file_name, folder, roots) if file_name else None
+            if hit:
+                part.path = props.part_relative(scene, project, plate, hit)
+                found += 1
+        plate.name = build3mf.plate_name_for(folder, roots)
+        left = len(missing) - found
+        self.report({'WARNING'} if left else {'INFO'},
+                    "Plate %s: %d of %d missing parts found%s" % (plate.name, found, len(missing),
+                                                                 "; %d still missing" % left if left else ""))
+        return {'FINISHED'}
+
+
 class ORCA_OT_import_project(bpy.types.Operator):
     bl_idname = "orca_reload.import_project"
     bl_label = "Import Orca Project"
@@ -570,5 +625,5 @@ class ORCA_OT_clear_log(bpy.types.Operator):
         return {'FINISHED'}
 
 
-classes = (ORCA_OT_list_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_browse_root, ORCA_OT_browse_template,
+classes = (ORCA_OT_list_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink, ORCA_OT_browse_root, ORCA_OT_browse_template,
            ORCA_OT_import_project, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)

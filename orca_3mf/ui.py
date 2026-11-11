@@ -5,7 +5,7 @@ import os
 
 import bpy
 
-from . import props
+from . import operators, props
 from .props import BUILD_ALL, BUILD_IDLE
 
 ICONS = {
@@ -326,6 +326,12 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         used = [p for p in plate.parts if p.use]
         draw_stats(col, [(len(plate.parts), 'PART'), (sum(p.copies for p in used), 'COPIES'),
                          (sum(1 for p in used if p.seam), 'SEAM')])
+        missing = len(operators.missing_parts(scene, project, plate))
+        if missing:
+            row = layout.row()
+            row.alert = True
+            row.operator("orca_reload.relink", text="Relink %d missing part%s" % (missing, "" if missing == 1 else "s"),
+                         icon=ICONS['DIR'])
 
         part = props.active_part(plate)
         if part is None:

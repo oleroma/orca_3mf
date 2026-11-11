@@ -823,51 +823,78 @@ def read_layout(path, finder, stl_cache=None):
 
 
 def _find_source(part, finder, project_dir, plate_name, folders):
-    """(STL path or None, note). The stored path, else the only file of that name below the STL root. When several
-    files have that name (one part exported with several tolerances), the plate's name says where it is: a plate
-    named after a folder ("tight/cap_loose") takes the file from the folder below the STL root whose path ends in that
-    name, or from the nearest folder above it. Nothing is guessed: else the part is not found."""
-    path, problem = finder.find(part.source, project_dir)
-    if path is not None:
-        return path, ""
-    file_name = os.path.basename(part.source.replace("\\", "/"))
-    names = finder._name_index().get(file_name.lower(), ())
-    if not names:
-        return None, problem or "STL not found"
+    """(STL path or None, note). Only paths, never a file found by its name alone (one part exported with several
+    tolerances has the same file name in each folder): the stored path; else the plate's name read as a folder (a
+    plate named "tight/cap_loose" takes the file from the folder below the STL root whose path ends in that name, or
+    from the nearest folder above it); else the stored path's trailing folders below the STL root."""
+    stored = part.source
+    if stored:
+        direct = stored if os.path.isabs(stored) else os.path.join(project_dir, stored)
+        if os.path.isfile(direct):
+            return direct, ""
+    file_name = os.path.basename(stored.replace("\\", "/"))
+    if not file_name:
+        return None, "no STL path stored"
     found = set()
-    for folder in _plate_folders(plate_name, finder, folders):
-        while True:
-            hit = next((n for n in names if os.path.normcase(os.path.dirname(n)) == os.path.normcase(folder)), None)
-            if hit is not None:
-                found.add(hit)
-                break
-            if any(os.path.normcase(folder) == os.path.normcase(r) for r in finder.search_dirs):
-                break
-            up = os.path.dirname(folder)
-            if up == folder:
-                break
-            folder = up
+    for folder in plate_folders(plate_name, finder.search_dirs, folders):
+        hit = find_up(file_name, folder, finder.search_dirs)
+        if hit:
+            found.add(hit)
     if len(found) == 1:
         return found.pop(), "from the plate's folder %s" % plate_name
     if found:
-        return None, "%d files named %s fit the plate's folder %s" % (len(found), file_name, plate_name)
-    return None, (problem or "STL not found") + "; name the plate after its folder (like tight/cap_loose) to " \
-        "say which one"
+        return None, "%d folders below the STL root end in the plate's name %s" % (len(found), plate_name)
+    path, _ = finder.find(stored, project_dir, by_name=False)
+    if path is not None:
+        return path, ""
+    if "/" in stored.replace("\\", "/"):
+        return None, "not found"
+    return None, ("Orca kept only the name %s: name the plate after its folder (like tight/cap_loose), or use "
+                  "Relink" % file_name)
 
 
-def _plate_folders(plate_name, finder, folders):
-    """The folders below the STL root whose path ends in the plate's name ("tight/cap_loose"), or []."""
-    want = [p.lower() for p in re.split(r"[\\/]+", plate_name.strip()) if p]
+def find_up(file_name, folder, roots):
+    """file_name in folder, else in the nearest folder above it, stopping at the root it is below (any folder of
+    roots); None when not found."""
+    tops = {os.path.normcase(os.path.abspath(r)) for r in roots}
+    folder = os.path.abspath(folder)
+    while True:
+        cand = os.path.join(folder, file_name)
+        if os.path.isfile(cand):
+            return cand
+        up = os.path.dirname(folder)
+        if os.path.normcase(folder) in tops or up == folder:
+            return None
+        folder = up
+
+
+def _split(path):
+    return [p for p in re.split(r"[\\/]+", path.strip()) if p]
+
+
+def plate_folders(plate_name, roots, folders=None):
+    """The folders below the roots whose path ends in the plate's name ("tight/cap_loose"), or [].
+    folders: a dict that keeps the folder list between calls."""
+    want = [p.lower() for p in _split(plate_name)]
     if not want:
         return []
+    folders = {} if folders is None else folders
     if "all" not in folders:
-        folders["all"] = [d for root in finder.search_dirs for d, _, _ in os.walk(root)]
-    out = []
-    for d in folders["all"]:
-        pieces = [p.lower() for p in re.split(r"[\\/]+", d) if p]
-        if pieces[-len(want):] == want:
-            out.append(d)
-    return out
+        folders["all"] = [d for root in roots for d, _, _ in os.walk(root)]
+    return [d for d in folders["all"] if [p.lower() for p in _split(d)][-len(want):] == want]
+
+
+def plate_name_for(folder, roots, folders=None):
+    """The shortest end of folder's path ("tight/cap_loose") that no other folder below the roots ends in, with /
+    between names; the folder's own name when it is not below a root."""
+    folders = {} if folders is None else folders
+    pieces = _split(os.path.abspath(folder))
+    for k in range(1, len(pieces) + 1):
+        name = "/".join(pieces[-k:])
+        hits = plate_folders(name, roots, folders)
+        if len(hits) <= 1:
+            return name
+    return "/".join(pieces)
 
 
 def common_folder(paths):

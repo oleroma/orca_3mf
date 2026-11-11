@@ -234,6 +234,32 @@ class BuildTest(unittest.TestCase):
         note = next(p.note for name, parts in plates if name == "Plate 3" for p in parts)
         self.assertIn("name the plate after its folder", note)
 
+    def test_a_file_name_alone_is_never_taken(self):
+        # Only one knob.stl below the root, but Orca kept just its name and the plate names no folder: not guessed
+        knob = self.write("knob", (10, 10, 10), (0, 0, 5), "somewhere/deep")
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", knob)])]))
+        self.replace_entry(reload3mf.MODEL_SETTINGS,
+                           self.settings_xml().replace('value="%s"' % knob, 'value="knob.stl"'))
+        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        part = plates[0][1][0]
+        self.assertIsNone(part.stl)
+        self.assertIn("Relink", part.note)
+
+    def test_find_up_and_plate_name_for(self):
+        root = os.path.join(self.dir, "stl")
+        button = self.write("button", (1, 1, 1), (0, 0, 0), "stl/buttons/tight")
+        dpad = self.write("dpad", (1, 1, 1), (0, 0, 0), "stl/buttons/tight/cap_loose")
+        self.write("dpad", (1, 1, 1), (0, 0, 0), "stl/buttons/tight/other")  # a sibling is never looked into
+        self.write("dpad", (1, 1, 1), (0, 0, 0), "stl/buttons/loose/cap_loose")
+        folder = os.path.join(root, "buttons", "tight", "cap_loose")
+        self.assertEqual(build3mf.find_up("dpad.stl", folder, [root]), dpad)
+        self.assertEqual(build3mf.find_up("button.stl", folder, [root]), button)
+        self.assertIsNone(build3mf.find_up("a.stl", folder, [os.path.join(root, "buttons")]))  # stops at the root
+        self.assertEqual(build3mf.find_up("a.stl", folder, [root]), self.stls["a"])  # the root itself counts
+        # cap_loose is in tight and loose: the plate name takes one more folder to say which
+        self.assertEqual(build3mf.plate_name_for(folder, [root]), "tight/cap_loose")
+        self.assertEqual(build3mf.plate_name_for(os.path.join(root, "buttons", "tight", "other"), [root]), "other")
+
     def replace_entry(self, name, text):
         tmp = self.out + ".tmp"
         with zipfile.ZipFile(self.out) as src, zipfile.ZipFile(tmp, "w") as dst:

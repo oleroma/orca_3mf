@@ -70,7 +70,7 @@ Each part's place on the plate is set again by the nesting. Objects made of seve
 
 ## Import
 
-**Import** makes a project from an existing Orca project: its plates, and each part with its STL, Up, Turn and copies. The STLs are looked for below the STL root. When several files have the part's file name (Orca often keeps only the name, and the tight and loose versions share it), the plate's name says which: name the plate after its folder, like `tight/cap_loose`, and each part is taken from the folder below the STL root that ends in that name, or from the nearest folder above it. Nothing is guessed: a part that does not fit comes in red, to be picked in the tab. The common folders become the project's and plates' STL folders. Build then updates that same file.
+**Import** makes a project from an existing Orca project: its plates, and each part with its STL, Up, Turn and copies. The STLs are looked for below the STL root. Import never takes a file by its name alone, since every tolerance version of a part has the same file name. It takes the stored path when Orca kept one. When Orca kept only the name, it takes the plate's name as the folder: name the plate after its folder, like `tight/cap_loose`, and each part comes from the folder below the STL root that ends in that name, or from the nearest folder above it. A part found neither way comes in red, and **Relink missing parts** (under the parts list) fixes the whole plate at once: pick the plate's folder, each missing part is looked for there and in the folders above it up to the STL root, and the plate is named after that folder so the next import finds them by itself. The common folders become the project's and plates' STL folders. Build then updates that same file.
 
 ## How it works
 

@@ -283,6 +283,32 @@ class OrcaTabTest(unittest.TestCase):
         report = self.build(settings.project_index)
         self.assertIn("(rebuilt)", report)
 
+    def test_relink_finds_missing_parts_from_a_folder_and_names_the_plate(self):
+        from bl_ext.orca_test.orca_3mf import operators
+        scene = bpy.context.scene
+        root = os.path.join(self.dir, "stl")
+        for folder in ("buttons/tight", "buttons/tight/cap_loose", "buttons/loose/cap_loose"):
+            name = "button.stl" if folder == "buttons/tight" else "dpad.stl"
+            fixtures.write_stl(os.path.join(root, folder, name), fixtures.box((5, 5, 2)))
+        project = self.add_project()
+        project.stl_folder = ""
+        self.add_part(path="../../../../button.stl")  # as Import leaves a part Orca kept only the name of
+        self.add_part(path="dpad.stl")
+        self.add_part(path="missing.stl")
+        self.add_part()  # found already: left alone
+        project.plates[0].parts[3].path = "GripV/parts/box.stl"
+        plate = project.plates[0]
+        self.assertEqual(len(operators.missing_parts(scene, project, plate)), 3)
+        result = bpy.ops.orca_reload.relink(directory=os.path.join(root, "buttons", "tight", "cap_loose") + os.sep)
+        self.assertEqual(result, {'FINISHED'})
+        self.assertEqual(plate.name, "tight/cap_loose")
+        from bl_ext.orca_test.orca_3mf import props
+        got = [os.path.normpath(props.part_path(scene, project, plate, p)) for p in plate.parts]
+        self.assertEqual(got[:2], [os.path.join(root, "buttons", "tight", "button.stl"),
+                                   os.path.join(root, "buttons", "tight", "cap_loose", "dpad.stl")])
+        self.assertEqual(got[3], self.stl)
+        self.assertEqual([p.path for p in operators.missing_parts(scene, project, plate)], ["missing.stl"])
+
     def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene
