@@ -490,6 +490,24 @@ class BuildTest(unittest.TestCase):
         self.assertNotIn('wall_loops', self.settings_xml())
         self.assertEqual(parts[0].mark, "")
 
+    def test_objects_added_in_orca_are_kept_and_parts_taken_off_the_tab_dropped(self):
+        a, b = self.stls["a"], self.stls["b"]
+        # b stands for an object added in Orca: in the 3MF, but not in the tab
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a),
+                                                          build3mf.PartSpec("b.stl", b, (1, 0, 0), copies=2)])]))
+        self.add_object_setting(b, "wall_loops", "6")
+        lines = self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a)])]))
+        self.assertTrue(any("b.stl" in line and "kept from the 3MF" in line for line in lines), lines)
+        self.assertIn('wall_loops" value="6"', self.object_block(b))
+        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([os.path.join(self.dir, "stl")]))
+        kept = [p for p in plates[0][1] if p.name == "b.stl"][0]
+        self.assertEqual((kept.up, kept.copies), ((1.0, 0.0, 0.0), 2))  # stands as it stood, with its copies
+        # The tab made b before and no longer has it: dropped
+        spec = self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a)])])
+        spec.known = {build3mf.object_key("p", "b.stl", b)}
+        self.build(spec)
+        self.assertNotIn('b.stl', self.settings_xml())
+
     def test_part_taller_than_printable_height_is_reported(self):
         make_template(self.template, printable_height="30")
         plates = [build3mf.PlateSpec("p", 5, [build3mf.PartSpec("b.stl", self.stls["b"], (0, 0, 1))])]

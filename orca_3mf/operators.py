@@ -431,6 +431,8 @@ class ORCA_OT_import_project(bpy.types.Operator):
                           if build3mf._inside(d, top_now)]
                 if len(leaves) == 1:
                     _set_plate_folder(scene, project, plate, leaves[0])
+        props.set_known_objects(project, {build3mf.object_key(build3mf.plate_key(name, n), p.name, p.source)
+                                          for n, (name, parts) in enumerate(plates) for p in parts})
         lines += ["  problem: %s" % p for p in problems]
         _show_log(context, lines)
         count = sum(len(parts) for _, parts in plates)
@@ -491,9 +493,12 @@ def project_spec(context, project, painted):
     lines = {}
     plates = []
     used = [(i, p) for i, p in enumerate(project.plates) if p.use]
+    known = props.known_objects(project)
     for plate_no, (plate_index, plate) in enumerate(used):
         parts = []
+        key = build3mf.plate_key(plate.name, plate_no)
         for part_index, part in enumerate(plate.parts):
+            known.add(build3mf.object_key(key, part.label(), part.path))  # ticked or not, the tab knows it
             if not part.use:
                 continue
             if not part.path:
@@ -519,7 +524,13 @@ def project_spec(context, project, painted):
     roots = props.roots(scene)
     return build3mf.ProjectSpec(props.project_path(scene, project), plates, template,
                                 shown=lambda p: paths.shown(p, *roots),
-                                out_path=props.build_path(scene, project)), problems
+                                out_path=props.build_path(scene, project), known=known), problems
+
+
+def _remember_built(project, spec):
+    """Saves which objects the tab put in the 3MF, so the next Build tells them from objects added in Orca."""
+    props.set_known_objects(project, {build3mf.object_key(build3mf.plate_key(plate.name, n), p.name, p.source)
+                                      for n, plate in enumerate(spec.plates) for p in plate.parts})
 
 
 def _mark_parts(project, spec):
@@ -723,6 +734,8 @@ def _build_steps(operator, context, projects):
                    os.path.normcase(os.path.abspath(spec.path))]
             if len(now) == 1:
                 _mark_parts(now[0], spec)
+                if ok:
+                    _remember_built(now[0], spec)
             lines += text + [""]
             written += ok
             done += 1

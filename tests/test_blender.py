@@ -365,6 +365,10 @@ class OrcaTabTest(unittest.TestCase):
         self.build()
         self.assertEqual([p.mark for p in plate.parts], ['NONE', 'WARNING'])
         self.assertIn("new part", plate.parts[1].mark_note)
+        # Taken off the tab: dropped from the 3MF (an object added in Orca would be kept)
+        plate.parts.remove(1)
+        self.build()
+        self.assertEqual([os.path.basename(p) for p in self.source_files()], ["box.stl"])
 
     def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
         from bl_ext.orca_test.orca_3mf import props

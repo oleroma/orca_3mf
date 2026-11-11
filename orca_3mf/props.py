@@ -94,6 +94,11 @@ class OrcaProject(bpy.types.PropertyGroup):
         description="On: Build writes into the project's 3MF itself. Off: the 3MF is never changed once it "
                     "exists; each Build writes the next numbered file into the 3mf_builds folder next to it "
                     "(project_001.3mf, project_002.3mf, ...)")
+    known: bpy.props.StringProperty(
+        options={'HIDDEN'},
+        description="The objects the last Build or Import put in the 3MF from the tab (JSON): one the tab no longer "
+                    "has is dropped by the next Build; any other object found in the 3MF was added in Orca and is "
+                    "kept")
     plates: bpy.props.CollectionProperty(type=OrcaPlate)
     plate_index: bpy.props.IntProperty()
 
@@ -238,6 +243,20 @@ def project_root(scene):
 def project_path(scene, project):
     name = project.name if project.name.lower().endswith(".3mf") else project.name + ".3mf"
     return paths.join(project_root(scene), project.folder, name)
+
+
+def known_objects(project):
+    """build3mf.object_key tuples saved in project.known."""
+    import json
+    try:
+        return {tuple(k) for k in json.loads(project.known or "[]")}
+    except (ValueError, TypeError):
+        return set()
+
+
+def set_known_objects(project, keys):
+    import json
+    project.known = json.dumps(sorted(list(k) for k in keys))
 
 
 def build_path(scene, project):

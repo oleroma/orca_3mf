@@ -96,9 +96,12 @@ class ProjectSpec:
     """A project: its 3MF file (absolute path; Build writes out_path, the same file unless given), its plates, a template project for the settings of a new
     project, the bed size used when no settings come with it, and how the report shows a path (default: as it is)."""
 
-    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None, out_path=None):
+    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None, out_path=None, known=()):
         self.path = path
         self.out_path = out_path or path  # where Build writes: the project itself, or a numbered build of it
+        # (plate key, object name, STL file name in lower case) of the objects the tab made or knows: an old
+        # object no part takes is dropped when known (taken off the tab), else kept (added in Orca)
+        self.known = set(known)
         self.shown = shown or (lambda p: p)
         self.plates = list(plates)
         self.template = template
@@ -154,6 +157,7 @@ class Base:
         self.objects = []  # [_OldObject], in file order
         self.plates = []  # [(name, [(key, value)])] of each plate, in file order
         self._plate_taken = set()
+        self.dropped = []  # warnings about old objects a build leaves out
         self.project = None
         if path and os.path.isfile(path):
             self._read_project(path)
@@ -421,6 +425,80 @@ def _prepare(obj, base, stl_cache, plate_name, plate_no=0):
     obj.lo, obj.hi = layout.footprint(obj.mesh.verts, obj.rotation)
 
 
+def _prepare_kept(obj, base):
+    """An object of the old project that no part of the tab took (added in Orca): kept as it is, with its stored
+    mesh, painting, settings, extra volumes, copies and how it stood; only nested again with the others."""
+    old = obj.old
+    project_obj = base.project.objects[old.id]
+    item = base.project.items[project_obj.items[0]] if project_obj.items else None
+    rows, _ = reload3mf.compose(reload3mf.parse_transform(item[1] if item else None),
+                                reload3mf.parse_transform(old.part.transform))
+    mirror = layout.det(rows) < 0.0
+    if mirror:
+        rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
+    up, angle = layout.orientation_from_matrix(rows)
+    spec = obj.spec
+    spec.up, spec.angle, spec.mirror = up, angle, mirror
+    spec.copies = max(1, len(project_obj.items))
+    obj.mesh = base.project.old_mesh(old.part)
+    obj.extras = {i: dict(a) for i, a in old.part.extras.items() if a}
+    meta = old.part.meta
+    try:
+        obj.offset = tuple(float(meta.get("source_offset_" + a, 0.0)) for a in "xyz")
+    except ValueError:
+        obj.offset = (0.0, 0.0, 0.0)
+    if old.extras:
+        try:
+            anchor = reload3mf.invert(reload3mf.parse_transform(old.part.transform))
+            obj.extra_volumes = _carry_extras(base, old, anchor)
+        except ReloadError:
+            obj.extra_volumes = []
+    obj.notes.append("kept from the 3MF: not in the tab")
+    obj.rotation = layout.orientation(up, angle)
+    if mirror:
+        obj.rotation = layout.matmul(obj.rotation, MIRROR)
+    obj.lo, obj.hi = layout.footprint(obj.mesh.verts, obj.rotation)
+
+
+def object_key(plate_key_, name, source):
+    """How the tab remembers an object it made: (plate key, object name, STL file name in lower case)."""
+    return (plate_key_, name, os.path.basename((source or "").replace("\\", "/")).lower())
+
+
+def _kept_objects(base, plate, plate_no, known, warnings):
+    """_Objects for the old objects on this plate that no part took and the tab never made (added in Orca), taken
+    out of base. One from the STL of a part of the plate stands for that part (its settings were not sure, the
+    part is marked red), so it is not kept as well."""
+    if base.project is None:
+        return []
+    key = plate_key(plate.name, plate_no)
+    files = {os.path.basename((p.source or p.stl).replace("\\", "/")).lower() for p in plate.parts}
+    out = []
+    for old in [o for o in base.objects if key in o.plates]:
+        base.objects.remove(old)
+        source = old.part.source if old.part else ""
+        if object_key(key, old.name, source) in known:
+            continue  # taken off the tab: dropped
+        if os.path.basename(source.replace("\\", "/")).lower() in files:
+            warnings.append("plate %d, %s: replaced by the tab's part of the same STL, its Orca settings not kept"
+                            % (plate_no + 1, old.name))
+            continue
+        if old.part is None:
+            warnings.append("plate %d, %s: added in Orca, but an object of several parts can't be kept: dropped"
+                            % (plate_no + 1, old.name))
+            continue
+        source = old.part.source or old.name
+        obj = _Object(PartSpec(old.name, source, source=source), plate_no)
+        obj.old = old
+        try:
+            _prepare_kept(obj, base)
+        except (ReloadError, KeyError, IndexError, ValueError) as e:
+            warnings.append("plate %d, %s: added in Orca, can't be kept (%s): dropped" % (plate_no + 1, old.name, e))
+            continue
+        out.append(obj)
+    return out
+
+
 def plan(spec, base, stl_cache=None):
     """Works out every object of the project and where its copies go. Returns (objects, problems, bed)."""
     stl_cache = {} if stl_cache is None else stl_cache
@@ -442,6 +520,7 @@ def plan(spec, base, stl_cache=None):
                 problems.append("plate %d, %s: %s" % (plate_no + 1, part.name, e))
                 continue
             plate_objects.append(obj)
+        plate_objects += _kept_objects(base, plate, plate_no, spec.known, base.dropped)
         sizes, owners = [], []
         for obj in plate_objects:
             size = (obj.hi[0] - obj.lo[0], obj.hi[1] - obj.lo[1])
@@ -727,7 +806,7 @@ def build(spec, stl_cache=None, dry_run=False):
         else:
             problems.append("no printer settings: set Settings from to an Orca project made for your printer "
                             "(Orca opens a project without them as bare parts, without plates)")
-        warnings = base.bed_warnings()
+        warnings = base.bed_warnings() + base.dropped
         height = (base.settings() or {}).get("printable_height")
         if height is not None:
             try:
