@@ -56,7 +56,7 @@ The line is snapped onto the part's surface within **Snap**, so one line serves 
 
 A **new** project takes its printer, process and filament settings from **Settings from**: any Orca project made for your printer. A project added to the list starts with the Settings from of the selected project, or that project's own file. Orca opens a project without settings as bare parts, without its plates, so Build refuses to write one.
 
-An **existing** project is never changed unless **Overwrite the 3MF** is ticked in the project box (it asks first). Without it, each Build writes the next numbered file into a `3mf_builds` folder next to the project (`GripV_parts_001.3mf`, `_002`, ...); old ones are left for you to delete. A new project (no file yet) is written as the project itself.
+An **existing** project is never changed unless **Overwrite the 3MF** is ticked in the project box (it asks first). Without it, each Build writes into a `3mf_builds` folder next to the project: first under the project's own name (`GripV_parts.3mf`), then numbered (`GripV_parts_001.3mf`, `_002`, ...); old ones are left for you to delete. A new project (no file yet) is written as the project itself.
 
 Build never reads the old 3MF: everything comes from the .blend. Import saved there:
 

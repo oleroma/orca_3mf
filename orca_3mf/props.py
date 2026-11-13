@@ -145,8 +145,8 @@ class OrcaProject(bpy.types.PropertyGroup):
     overwrite: bpy.props.BoolProperty(
         name="Overwrite",
         description="On: Build writes into the project's 3MF itself. Off: the 3MF is never changed once it "
-                    "exists; each Build writes the next numbered file into the 3mf_builds folder next to it "
-                    "(project_001.3mf, project_002.3mf, ...)")
+                    "exists; each Build writes the next file into the 3mf_builds folder next to it "
+                    "(project.3mf, then project_001.3mf, project_002.3mf, ...)")
     profiles: bpy.props.StringProperty(
         options={'HIDDEN'},
         description="The printer, process and filament settings saved by Import (JSON: file in the 3MF -> text)")

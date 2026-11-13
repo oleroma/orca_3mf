@@ -122,27 +122,36 @@ class ProjectSpec:
         self.profiles_from = profiles_from  # the 3MF they were imported from, for the report
 
 
-def next_build_path(path, folder="3mf_builds"):
-    """The next numbered build of a project: <its folder>/3mf_builds/<name>_001.3mf, _002, ... after the highest
-    number there."""
+def _numbered_builds(path, folder):
+    """(builds folder, project stem, {number: file name}) of a project's numbered builds."""
     out_dir = os.path.join(os.path.dirname(os.path.abspath(path)), folder)
     stem = os.path.splitext(os.path.basename(path))[0]
     pattern = re.compile(re.escape(stem) + r"_(\d+)\.3mf$", re.IGNORECASE)
-    numbers = [int(m.group(1)) for m in map(pattern.match, os.listdir(out_dir) if os.path.isdir(out_dir) else ())
-               if m]
-    return os.path.join(out_dir, "%s_%03d.3mf" % (stem, max(numbers, default=0) + 1))
+    found = {}
+    for name in (os.listdir(out_dir) if os.path.isdir(out_dir) else ()):
+        m = pattern.match(name)
+        if m:
+            found[int(m.group(1))] = name
+    return out_dir, stem, found
+
+
+def next_build_path(path, folder="3mf_builds"):
+    """The next build of a project: <its folder>/3mf_builds/<name>.3mf first, then <name>_001.3mf, _002, ...
+    after the highest number there."""
+    out_dir, stem, found = _numbered_builds(path, folder)
+    plain = os.path.join(out_dir, stem + ".3mf")
+    if not found and not os.path.isfile(plain):
+        return plain
+    return os.path.join(out_dir, "%s_%03d.3mf" % (stem, max(found, default=0) + 1))
 
 
 def latest_build_path(path, folder="3mf_builds"):
-    """The newest numbered build of a project, or None."""
-    nxt = next_build_path(path, folder)
-    number = int(re.search(r"_(\d+)\.3mf$", nxt).group(1)) - 1
-    if number < 1:
-        return None
-    out_dir = os.path.dirname(nxt)
-    stem = os.path.splitext(os.path.basename(path))[0]
-    pattern = re.compile(re.escape(stem) + r"_0*%d\.3mf$" % number, re.IGNORECASE)
-    return next((os.path.join(out_dir, n) for n in sorted(os.listdir(out_dir)) if pattern.match(n)), None)
+    """The newest build of a project, or None."""
+    out_dir, stem, found = _numbered_builds(path, folder)
+    if found:
+        return os.path.join(out_dir, found[max(found)])
+    plain = os.path.join(out_dir, stem + ".3mf")
+    return plain if os.path.isfile(plain) else None
 
 
 def _decode(data):

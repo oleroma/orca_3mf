@@ -314,8 +314,8 @@ class OrcaTabTest(unittest.TestCase):
         self.add_part(copies=2)
         self.build()
         project.overwrite = False
-        self.build()  # 3mf_builds/GripV_parts_001.3mf
-        build = os.path.join(os.path.dirname(self.out()), "3mf_builds", "GripV_parts_001.3mf")
+        self.build()  # 3mf_builds/GripV_parts.3mf
+        build = os.path.join(os.path.dirname(self.out()), "3mf_builds", "GripV_parts.3mf")
         # Moved in Orca: every item 5 mm to the right
         with zipfile.ZipFile(build) as z:
             entries = {n: z.read(n) for n in z.namelist()}
@@ -379,9 +379,10 @@ class OrcaTabTest(unittest.TestCase):
         self.assertIn("(new)", self.build())  # the 3MF does not exist yet: written as the project itself
         before = os.path.getmtime(self.out())
         builds = os.path.join(os.path.dirname(self.out()), "3mf_builds")
-        self.assertIn("3mf_builds/GripV_parts_001.3mf (new build of", self.build().replace(os.sep, "/"))
+        self.assertIn("3mf_builds/GripV_parts.3mf (new build of", self.build().replace(os.sep, "/"))
         self.build()
-        self.assertEqual(sorted(os.listdir(builds)), ["GripV_parts_001.3mf", "GripV_parts_002.3mf"])
+        self.build()
+        self.assertEqual(sorted(os.listdir(builds)), ["GripV_parts.3mf", "GripV_parts_001.3mf", "GripV_parts_002.3mf"])
         self.assertEqual(os.path.getmtime(self.out()), before)  # never touched
         # Turned on (the confirmation shows only when clicked): written in place again
         self.assertEqual(bpy.ops.orca_reload.overwrite(), {'FINISHED'})
