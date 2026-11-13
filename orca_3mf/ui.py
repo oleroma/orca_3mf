@@ -17,6 +17,8 @@ ICONS = {
     'BLANK': 'BLANK1', 'CANCEL': 'CANCEL', 'TURN': 'DRIVER_ROTATIONAL_DIFFERENCE', 'UPAXIS': 'EMPTY_SINGLE_ARROW',
 }
 
+# Width of the copies column in the parts list (room for "x999"), in UI units
+COPIES_UNITS = 1.8
 # Rows of a list: tall enough for its six buttons (the list scrolls beyond)
 LIST_ROWS = 6
 # Width of the labels before the root folder fields, in UI units
@@ -127,8 +129,10 @@ class ORCA_UL_parts(bpy.types.UIList):
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
-        if item.copies > 1:
-            tools.label(text="x%d" % item.copies)
+        copies = tools.row(align=True)  # a column of its own, so the paths line up
+        copies.ui_units_x = COPIES_UNITS
+        copies.alignment = 'RIGHT'
+        copies.label(text="x%d" % item.copies if item.copies > 1 else "")
         tools.label(text="", icon=ICONS['SEAM'] if item.seam else ICONS['BLANK'])
         level, _ = props.part_mark(context.scene, project, plate, item)
         path = tools.row(align=True)
