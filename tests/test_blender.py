@@ -460,6 +460,22 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual((plate.name, plate.stl_folder), ("loose/cap_loose", "loose/cap_loose"))
         self.assertEqual(files(), ["loose/button.stl", "loose/cap_loose/dpad.stl"])
 
+    def test_a_plate_of_the_stl_folder_itself_is_named_after_it(self):
+        from bl_ext.orca_test.orca_3mf import props
+        scene = bpy.context.scene
+        project = self.add_project()
+        project.stl_folder = "GripV/parts"
+        self.add_part(path="box.stl")
+        plate = project.plates[0]
+        project.plate_paths = True
+        self.assertEqual(plate.name, "parts")  # the parts lie in the STL folder itself
+        self.assertEqual(os.path.normpath(props.plate_folder(scene, project, plate)),
+                         os.path.dirname(self.stl))
+        self.assertEqual(os.path.normpath(props.part_path(scene, project, plate, plate.parts[0])), self.stl)
+        project.plate_paths = False  # back: the plate's STL folder is the project's
+        self.assertEqual(plate.stl_folder, "")
+        self.assertEqual(os.path.normpath(props.part_path(scene, project, plate, plate.parts[0])), self.stl)
+
     def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
         from bl_ext.orca_test.orca_3mf import props
         scene = bpy.context.scene

@@ -757,6 +757,17 @@ def read_project(path, finder, plate_paths=False, top=None, known=None, bed=(256
         project.close()
 
 
+def plate_dir(top, name):
+    """The folder a plate name stands for below top (the project's STL folder): that path, or top itself when the
+    name is top's own folder name and top has no folder of that name (a plate of the parts lying in top)."""
+    path = os.path.join(top, *_split(name))
+    if os.path.isdir(path):
+        return path
+    if name and name.strip("/\\") == os.path.basename(os.path.normpath(top)) and os.path.isdir(top):
+        return top
+    return path
+
+
 def _find_source(part, finder, project_dir, plate_name, folders, top=None, known=None):
     """(STL path or None, note). Only exact paths, never a file found by its name alone (one part exported with
     several tolerances has the same file name in each folder), in this order:
@@ -780,8 +791,7 @@ def _find_source(part, finder, project_dir, plate_name, folders, top=None, known
     plate_note = ""
     if plate_name:
         tops = [top] if top else finder.search_dirs
-        leaf = next((os.path.join(t, *_split(plate_name)) for t in tops
-                     if os.path.isdir(os.path.join(t, *_split(plate_name)))), None)
+        leaf = next((plate_dir(t, plate_name) for t in tops if os.path.isdir(plate_dir(t, plate_name))), None)
         if leaf is not None:
             hits = find_all_up(file_name, leaf, tops)
             if len(hits) == 1:

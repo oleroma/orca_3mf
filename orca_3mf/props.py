@@ -263,8 +263,21 @@ def plate_folder(scene, project, plate, by_name=None):
     """The plate's folder: its name below the project's STL folder while "Plate names are folders" is on (by_name),
     else its own STL folder."""
     by_name = project.plate_paths if by_name is None else by_name
+    if by_name and plate is not None and plate.name:
+        from . import build3mf
+        return build3mf.plate_dir(project_stl_folder(scene, project), plate.name)
     sub = (plate.name if by_name else plate.stl_folder) if plate else ""
     return paths.join(stl_root(scene), project.stl_folder, sub)
+
+
+def folder_name(scene, project, folder):
+    """The plate name for a folder below (or at) the project's STL folder: its path from there, or the STL
+    folder's own name for the STL folder itself."""
+    top = project_stl_folder(scene, project)
+    rel = paths.relative_form(folder, top)
+    if rel == ".":
+        return os.path.basename(os.path.normpath(top))
+    return rel
 
 
 def deepest_line_folder(folders):
@@ -289,12 +302,11 @@ def move_plate(scene, project, plate, folder=None, name=None):
     if name is not None:
         plate.name = name
     if folder is not None:
-        rel = paths.relative_form(folder, project_stl_folder(scene, project))
-        rel = "" if rel == "." else rel
         if project.plate_paths:
-            plate.name = rel
+            plate.name = folder_name(scene, project, folder)
         else:
-            plate.stl_folder = rel
+            rel = paths.relative_form(folder, project_stl_folder(scene, project))
+            plate.stl_folder = "" if rel == "." else rel
     for part, stl, (mark, note) in zip(plate.parts, stls, marks):
         if stl and os.path.isfile(stl):  # a missing part keeps what Orca stored (often only its name)
             part.path = part_relative(scene, project, plate, stl)
@@ -313,7 +325,8 @@ def name_plate_from_parts(scene, project, plate, fallback=None, whole=False):
         return False
     leaf = deepest_line_folder([os.path.dirname(s) for s in found])
     top = os.path.normcase(os.path.abspath(project_stl_folder(scene, project)))
-    if leaf is not None and os.path.normcase(leaf).startswith(top.rstrip(os.sep) + os.sep):
+    if leaf is not None and (os.path.normcase(leaf) == top
+                             or os.path.normcase(leaf).startswith(top.rstrip(os.sep) + os.sep)):
         move_plate(scene, project, plate, folder=leaf)
         return True
     if fallback:
@@ -346,9 +359,7 @@ def plate_paths_changed(scene, project):
                                            os.path.normcase(leaf).startswith(
                                                os.path.normcase(os.path.abspath(top)).rstrip(os.sep) + os.sep))
             if inside:
-                rel = paths.relative_form(leaf, top)
-                if rel != ".":
-                    plate.name = rel
+                plate.name = folder_name(scene, project, leaf)
         else:
             old = plate_folder(scene, project, plate, by_name=True)
             rel = paths.relative_form(old, top)
