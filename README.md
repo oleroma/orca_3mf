@@ -82,7 +82,7 @@ With **Plate names are folders** on, a plate's name *is* its folder: the plate's
 
 Anything else comes in red with the reason. **Relink missing parts** (under the parts list) fixes the whole plate at once: pick a folder, each missing part is looked for in that folder only; with Plate names are folders ticked also in the folders above it, and the plate is named after the folder so the next import finds its parts by itself. Each part also has its own folder button. Import's **STL folder** field sets the project's STL folder where looking up stops; empty, it is the folder all found parts share.
 
-The parts list marks each part: red when its STL is missing or nothing sure was found, yellow when it works but needs a look (with Plate names are folders, an STL outside the plate's folder and the folders above it, which Import could not find again from its name). The part's box says why.
+The parts list marks a part red when its STL is missing or nothing sure was found; the part's box says why. Click its warning icon to pick the file (any name). The warning icon of a plate opens Relink for that plate. A file you pick or add by hand is never marked: Update from 3MF keeps the tab's links.
 
 ## How it works
 

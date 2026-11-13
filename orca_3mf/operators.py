@@ -245,6 +245,9 @@ class ORCA_OT_add_parts(bpy.types.Operator):
             part.name = name
         if names:
             plate.part_index = len(plate.parts) - 1
+            if not os.path.isdir(props.plate_folder(context.scene, project, plate)):
+                # A plate whose name isn't a folder yet takes the folder its parts share once all are found
+                props.name_plate_from_parts(context.scene, project, plate, whole=True)
         return {'FINISHED'}
 
 

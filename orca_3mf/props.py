@@ -234,17 +234,13 @@ def set_mark(part, level, note):
 
 
 def part_mark(scene, project, plate, part):
-    """(level, why) of a part as the tab shows it: red when its STL is missing or the last Import or Build was not
-    sure; yellow when that found something to check, or when its STL is outside the plate's folder and the folders
-    above it, with "Plate names are folders" on (Import would not find it again from a file name)."""
+    """(level, why) of a part as the tab shows it: red when its STL is missing or the last Import was not sure.
+    A file picked by hand is never marked: Update from 3MF keeps the tab's links."""
     path = part_path(scene, project, plate, part) if part.path else ""
     if not path or not os.path.isfile(path):
         return 'ERROR', part.mark_note or ("no STL file" if not path else "STL not found")
     if part.mark != 'NONE':
         return part.mark, part.mark_note
-    if project.plate_paths and not in_plate_folders(scene, project, plate, path):
-        return 'WARNING', ("not in this plate's folder or the folders above it: Import can't find it again when "
-                           "Orca keeps only its file name")
     return 'NONE', ""
 
 

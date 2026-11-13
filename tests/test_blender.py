@@ -370,7 +370,7 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual(got[3], self.stl)
         self.assertEqual([p.path for p in operators.missing_parts(scene, project, plate)], ["missing.stl"])
         self.assertEqual([props.part_mark(scene, project, plate, p)[0] for p in plate.parts],
-                         ['NONE', 'NONE', 'ERROR', 'WARNING'])  # box.stl is not in tight/cap_loose or above it
+                         ['NONE', 'NONE', 'ERROR', 'NONE'])  # a file picked by hand is never marked
 
     def test_builds_are_numbered_unless_overwrite_is_on(self):
         project = self.add_project()
