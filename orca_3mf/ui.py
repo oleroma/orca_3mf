@@ -20,6 +20,8 @@ ICONS = {
 # Width of the copies column in the parts list (room for "x999"), in UI units
 COPIES_UNITS = 1.8
 PART_NAME_SPLIT = 0.3  # share of the row the part name gets; the rest is copies + path
+# Width of the gap column in the plates list (icon and "12.5 mm"), in UI units
+GAP_UNITS = 3.5
 # Rows of a list: tall enough for its six buttons (the list scrolls beyond)
 LIST_ROWS = 6
 # Width of the labels before the root folder fields, in UI units
@@ -100,11 +102,13 @@ class ORCA_UL_projects(bpy.types.UIList):
 
 class ORCA_UL_plates(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        split = layout.split(factor=0.45)
+        project = data
+        # With plate names as folders the name takes all the room the narrow gap leaves; else it shares it with
+        # the plate's STL folder
+        split = layout if project.plate_paths else layout.split(factor=0.45)
         row = split.row(align=True)
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.label(text="%d" % (index + 1))
-        project = data
         scene = context.scene
         no_folder = project.plate_paths and not os.path.isdir(props.plate_folder(scene, project, item))
         name = row.row(align=True)
@@ -116,8 +120,10 @@ class ORCA_UL_plates(bpy.types.UIList):
             name.label(text="", icon=ICONS['DIR'])
         name.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
-        tools.label(text="", icon=ICONS['GAP'])
-        tools.prop(item, "gap", text="", emboss=False)
+        gap = tools.row(align=True)  # narrow: a gap is a short number
+        gap.ui_units_x = GAP_UNITS
+        gap.label(text="", icon=ICONS['GAP'])
+        gap.prop(item, "gap", text="", emboss=False)
         if not project.plate_paths:
             tools.separator(factor=0.5)
             tools.prop(item, "stl_folder", text="", emboss=False, icon=ICONS['DIR'])
