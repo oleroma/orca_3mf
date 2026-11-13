@@ -251,13 +251,20 @@ class ORCA_OT_add_parts(bpy.types.Operator):
 class ORCA_OT_browse_part(bpy.types.Operator):
     bl_idname = "orca_reload.browse_part"
     bl_label = "Pick STL"
-    bl_description = "Pick the active part's STL file"
+    bl_description = "Pick the part's STL file: any file, also one with another name"
     bl_options = {'UNDO', 'INTERNAL'}
     filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
     directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
     filter_glob: bpy.props.StringProperty(default="*.stl", options={'HIDDEN'})
+    part: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})  # from a part row: that part
+
+    def _pick(self, context):
+        plate = props.active_plate(props.active_project(context.scene.orca_reload))
+        if plate is not None and 0 <= self.part < len(plate.parts):
+            plate.part_index = self.part
 
     def invoke(self, context, event):
+        self._pick(context)
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = props.active_plate(project)
@@ -265,12 +272,13 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         if part is None:
             return {'CANCELLED'}
         current = props.part_path(context.scene, project, plate, part) if part.path else ""
-        if current:
+        if current and os.path.isfile(current):
             self.filepath = current
         return _stl_browser(self, context, os.path.dirname(current) if current else
                             props.plate_folder(context.scene, project, plate))
 
     def execute(self, context):
+        self._pick(context)
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = props.active_plate(project)

@@ -147,7 +147,11 @@ class ORCA_UL_parts(bpy.types.UIList):
         level, _ = props.part_mark(context.scene, project, plate, item)
         path = tools.row(align=True)
         path.alert = level == 'ERROR'
-        path.prop(item, "path", text="", emboss=False, icon='ERROR' if level != 'NONE' else ICONS['STL'])
+        if level != 'NONE':  # the warning picks the part's file
+            path.operator("orca_reload.browse_part", text="", icon='ERROR', emboss=False).part = index
+            path.prop(item, "path", text="", emboss=False)
+        else:
+            path.prop(item, "path", text="", emboss=False, icon=ICONS['STL'])
 
 
 class ORCA_UL_copies(bpy.types.UIList):

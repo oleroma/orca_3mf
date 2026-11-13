@@ -447,8 +447,9 @@ class OrcaTabTest(unittest.TestCase):
         plate.parts[1].path = "x/dpad.stl"
         bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "button.stl"))  # the active part
         self.assertEqual(plate.name, "Plate 1")  # dpad still missing
-        plate.part_index = 1
-        bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "cap_loose", "dpad.stl"))
+        # The warning in the part's row picks that part's file, whichever part is active
+        bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "cap_loose", "dpad.stl"), part=1)
+        self.assertEqual(plate.part_index, 1)
         plate.part_index = 0
         bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "button.stl"))
         self.assertEqual(plate.name, "tight/cap_loose")
