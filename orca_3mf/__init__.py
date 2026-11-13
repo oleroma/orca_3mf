@@ -1,4 +1,4 @@
-"""Orca 3MF: an "Orca" tab in the 3D Viewport sidebar that builds OrcaSlicer projects (.3mf) from projects > plates
+"""Orca 3MF: an "Orca3mf" tab in the 3D Viewport sidebar that builds OrcaSlicer projects (.3mf) from projects > plates
 > parts set up in Blender: each part an exported STL, stood on the plate by an up axis and a turn, nested with a gap,
 and painted with the seam drawn on it as a curve or marked edges.
 

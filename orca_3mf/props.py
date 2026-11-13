@@ -26,6 +26,42 @@ MARKS = (('NONE', "None", "Nothing to check"),
          ('ERROR', "Not sure", "Not sure, so nothing was taken"))
 
 
+class OrcaCopy(bpy.types.PropertyGroup):
+    placed: bpy.props.BoolProperty(
+        name="Placed", default=False,
+        description="This copy has its spot. Off: the next Build nests it in free space and records where it went")
+    x: bpy.props.FloatProperty(
+        name="X", subtype='DISTANCE', precision=2,
+        description="Where the centre of the copy's footprint stands, from the plate's front left corner")
+    y: bpy.props.FloatProperty(
+        name="Y", subtype='DISTANCE', precision=2,
+        description="Where the centre of the copy's footprint stands, from the plate's front left corner")
+    turn: bpy.props.FloatProperty(
+        name="Turn", subtype='ANGLE', soft_min=-math.pi, soft_max=math.pi,
+        description="Turn of this copy around the vertical, on top of the part's own Turn")
+
+
+def _get_copies(self):
+    n = len(self.instances)
+    if n:
+        return n
+    try:
+        return max(1, int(self.get("copies", 1)))  # saved before each copy had its spot
+    except (TypeError, ValueError):
+        return 1
+
+
+def _set_copies(self, value):
+    value = max(1, int(value))
+    if not len(self.instances):
+        for _ in range(_get_copies(self)):
+            self.instances.add()
+    while len(self.instances) < value:
+        self.instances.add()
+    while len(self.instances) > value:
+        self.instances.remove(len(self.instances) - 1)
+
+
 class OrcaPart(bpy.types.PropertyGroup):
     use: bpy.props.BoolProperty(name="Build", default=True, description="Put this part on its plate")
     name: bpy.props.StringProperty(
@@ -43,8 +79,15 @@ class OrcaPart(bpy.types.PropertyGroup):
     angle: bpy.props.FloatProperty(
         name="Turn", subtype='ANGLE', default=0.0, soft_min=-math.pi, soft_max=math.pi,
         description="Turn around the up axis once the part stands on the plate")
-    copies: bpy.props.IntProperty(name="Copies", default=1, min=1, soft_max=20,
-                                  description="How many of this part go on the plate")
+    instances: bpy.props.CollectionProperty(type=OrcaCopy)
+    instance_index: bpy.props.IntProperty()
+    copies: bpy.props.IntProperty(name="Copies", min=1, soft_max=20, get=_get_copies, set=_set_copies,
+                                  description="How many of this part go on the plate. A new copy is nested by the "
+                                              "next Build, which records its spot")
+    orca_object: bpy.props.StringProperty(
+        options={'HIDDEN'}, description="The object's own Orca settings, saved by Import (JSON key, value pairs)")
+    orca_part: bpy.props.StringProperty(
+        options={'HIDDEN'}, description="The part's own Orca settings, saved by Import (JSON key, value pairs)")
     mirror: bpy.props.BoolProperty(
         name="Mirror", default=False,
         description="Mirror the part across its own X axis before standing it up: a part mirrored in Orca "
@@ -71,11 +114,8 @@ class OrcaPlate(bpy.types.PropertyGroup):
     stl_folder: bpy.props.StringProperty(
         name="STL folder", description="Folder of this plate's parts, below the project's STL folder. "
                                        "Use / between folders")
-    keep: bpy.props.BoolProperty(
-        name="Keep positions", default=False,
-        description="Parts found in the project's 3MF keep where they stand on this plate (moved by hand in Orca), "
-                    "with their copies; only new parts and new copies are nested, around them. Off: the whole "
-                    "plate is nested again")
+    orca_meta: bpy.props.StringProperty(
+        options={'HIDDEN'}, description="The plate's own Orca settings, saved by Import (JSON key, value pairs)")
     parts: bpy.props.CollectionProperty(type=OrcaPart)
     part_index: bpy.props.IntProperty()
 
@@ -90,7 +130,8 @@ class OrcaProject(bpy.types.PropertyGroup):
     template: bpy.props.StringProperty(
         name="Settings from",
         description="An Orca project (.3mf) whose printer, process and filament settings a new project starts "
-                    "with; the bed size comes from it too. Once the project exists, its own settings are kept. "
+                    "with; the bed size comes from it too. Not used once Import or Update from 3MF saved the "
+                    "project's own settings. "
                     "A relative path (../printer.3mf) starts at the .blend file's folder")
     plate_paths: bpy.props.BoolProperty(
         name="Plate names are folders",
@@ -106,11 +147,12 @@ class OrcaProject(bpy.types.PropertyGroup):
         description="On: Build writes into the project's 3MF itself. Off: the 3MF is never changed once it "
                     "exists; each Build writes the next numbered file into the 3mf_builds folder next to it "
                     "(project_001.3mf, project_002.3mf, ...)")
-    known: bpy.props.StringProperty(
+    profiles: bpy.props.StringProperty(
         options={'HIDDEN'},
-        description="The objects the last Build or Import put in the 3MF from the tab (JSON): one the tab no longer "
-                    "has is dropped by the next Build; any other object found in the 3MF was added in Orca and is "
-                    "kept")
+        description="The printer, process and filament settings saved by Import (JSON: file in the 3MF -> text)")
+    profiles_from: bpy.props.StringProperty(
+        name="Settings saved from", description="The 3MF the saved printer, process and filament settings came from")
+    orca_metadata: bpy.props.StringProperty(options={'HIDDEN'})  # the Orca version that wrote them (JSON)
     plates: bpy.props.CollectionProperty(type=OrcaPlate)
     plate_index: bpy.props.IntProperty()
 
@@ -354,18 +396,39 @@ def project_path(scene, project):
     return paths.join(project_root(scene), project.folder, name)
 
 
-def known_objects(project):
-    """build3mf.object_key tuples saved in project.known."""
+def load_json(text, default):
     import json
     try:
-        return {tuple(k) for k in json.loads(project.known or "[]")}
+        value = json.loads(text) if text else default
     except (ValueError, TypeError):
-        return set()
+        return default
+    return value if isinstance(value, type(default)) else default
 
 
-def set_known_objects(project, keys):
+def dump_json(value):
     import json
-    project.known = json.dumps(sorted(list(k) for k in keys))
+    return json.dumps(value, separators=(",", ":"))
+
+
+def pairs(text):
+    """[(key, value)] saved as JSON."""
+    return [tuple(p) for p in load_json(text, []) if isinstance(p, list) and len(p) == 2]
+
+
+def spots(part):
+    """(x, y, turn) of each copy of the part, None for a copy without its spot."""
+    if not len(part.instances):
+        return [None] * part.copies
+    return [(c.x, c.y, c.turn) if c.placed else None for c in part.instances]
+
+
+def set_spots(part, values):
+    """Records where each copy stands (None: not placed)."""
+    part.copies = max(1, len(values))
+    for c, spot in zip(part.instances, values):
+        c.placed = spot is not None
+        if spot is not None:
+            c.x, c.y, c.turn = spot
 
 
 def build_path(scene, project):
@@ -413,7 +476,7 @@ def from_dict(item, data):
                 pass
 
 
-classes = (OrcaPart, OrcaPlate, OrcaProject, OrcaLogLine, OrcaSettings)
+classes = (OrcaCopy, OrcaPart, OrcaPlate, OrcaProject, OrcaLogLine, OrcaSettings)
 
 
 BUILD_IDLE, BUILD_ALL = -2, -1  # building(): no build, Build all, else the project's index
@@ -443,6 +506,8 @@ def register_properties():
     wm.orca_reload_log = bpy.props.CollectionProperty(type=OrcaLogLine)
     wm.orca_reload_log_index = bpy.props.IntProperty()
     wm.orca_reload_tips = bpy.props.BoolProperty(name="Guide", default=False)
+    wm.orca_reload_copies = bpy.props.BoolProperty(name="Show copies", default=False,
+                                                   description="Show where each copy of the part stands")
     # How far the build in progress is, and what it does now
     wm.orca_reload_progress = bpy.props.FloatProperty(name="Progress", default=0.0, min=0.0, max=1.0)
     wm.orca_reload_status = bpy.props.StringProperty(default="")
@@ -453,6 +518,7 @@ def unregister_properties():
     del wm.orca_reload_status
     del wm.orca_reload_progress
     del wm.orca_reload_tips
+    del wm.orca_reload_copies
     del wm.orca_reload_log_index
     del wm.orca_reload_log
     del bpy.types.Scene.orca_reload

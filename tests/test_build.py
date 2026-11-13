@@ -323,7 +323,18 @@ class BuildTest(unittest.TestCase):
                 dst.writestr(info, text.encode() if info.filename == name else src.read(info.filename))
         os.replace(tmp, self.out)
 
-    def test_rebuild_keeps_settings_and_painting(self):
+    def reimported(self, plates=None, gap=5):
+        """The project as the tab holds it after Import: a ProjectSpec from read_project alone."""
+        imported, problems = build3mf.read_project(self.out, reload3mf.SourceFinder([self.dir]))
+        self.assertEqual(problems, [])
+        spec = build3mf.ProjectSpec(self.out, [build3mf.PlateSpec(p.name, gap, [
+            build3mf.PartSpec(x.name, x.stl, x.up, x.angle, x.copies, mirror=x.mirror, spots=x.spots,
+                              object_meta=x.object_meta, part_meta=x.part_meta) for x in p.parts], meta=p.meta)
+            for p in imported.plates], "", profiles=imported.profiles, metadata=imported.metadata,
+            profiles_from="the import")
+        return spec, imported
+
+    def test_import_saves_the_settings_and_build_needs_no_old_3mf(self):
         self.build()
         # Settings and painting made in Orca: printer settings, a part setting, a plate setting, support paint
         with zipfile.ZipFile(self.out) as z:
@@ -333,6 +344,9 @@ class BuildTest(unittest.TestCase):
         text = text.replace('<metadata key="name" value="a.stl"/>\n    <metadata key="extruder" value="1"/>',
                             '<metadata key="name" value="a.stl"/>\n    <metadata key="extruder" value="1"/>\n'
                             '    <metadata key="wall_loops" value="5"/>', 1)
+        text = text.replace('<metadata key="source_volume_id" value="0"/>',
+                            '<metadata key="source_volume_id" value="0"/>\n'
+                            '      <metadata key="sparse_infill_density" value="40%"/>', 1)
         text = text.replace('<metadata key="plater_name" value="second"/>',
                             '<metadata key="plater_name" value="second"/>\n'
                             '    <metadata key="curr_bed_type" value="Textured PEI Plate"/>')
@@ -341,24 +355,36 @@ class BuildTest(unittest.TestCase):
                                               r'\1 paint_supports="4"/>', mesh_text, count=1))
         self.replace_entry(build3mf.SETTINGS, json.dumps({"printable_area": A1_AREA, "layer_height": "0.12"}))
 
-        lines = self.build(self.spec(template=""))
-        self.assertIn("(rebuilt)", lines[0])
+        spec, imported = self.reimported()
+        self.assertIn("Metadata/filament_settings_1.config", imported.profiles)
+        a = spec.plates[0].parts[0]
+        self.assertIn(("wall_loops", "5"), a.object_meta)
+        self.assertIn(("sparse_infill_density", "40%"), a.part_meta)
+        self.assertNotIn("source_file", dict(a.part_meta))  # Orca's own keys are written fresh
+        self.assertIn(("curr_bed_type", "Textured PEI Plate"), spec.plates[1].meta)
+        os.remove(self.out)  # Build never reads the old 3MF
+        spec.plates.reverse()  # plate settings travel with their plate
+        lines = self.build(spec)
+        self.assertIn("settings from the import", lines[1])
         text = self.settings_xml()
         self.assertIn('<metadata key="wall_loops" value="5"/>', text)
-        self.assertIn('<metadata key="curr_bed_type" value="Textured PEI Plate"/>', text)
+        self.assertIn('<metadata key="sparse_infill_density" value="40%"/>', text)
+        second = text[text.index('plater_name" value="second"'):]
+        self.assertIn('plater_id" value="1"', text[:text.index('plater_name" value="second"')].split("<plate>")[-1])
+        self.assertIn('curr_bed_type" value="Textured PEI Plate"', second[:second.index("</plate>")])
         with zipfile.ZipFile(self.out) as z:
             self.assertEqual(json.loads(z.read(build3mf.SETTINGS))["layer_height"], "0.12")
-            self.assertIn("Metadata/filament_settings_1.config", z.namelist())  # the project's own settings files
+            self.assertIn("Metadata/filament_settings_1.config", z.namelist())
             name = [n for n in z.namelist() if n.startswith("3D/Objects/a.stl")][0]
-            self.assertEqual(z.read(name).decode().count('paint_supports="4"'), 1)
+            self.assertNotIn("paint_supports", z.read(name).decode())  # painting belongs to the old mesh
 
-        # A new shape loses the painting, and says so
-        self.stls["a"] = self.write("a", (42, 20, 10), (100, 50, 5))
-        lines = self.build()
-        self.assertTrue(any("painting removed" in line for line in lines), lines)
-        with zipfile.ZipFile(self.out) as z:
-            name = [n for n in z.namelist() if n.startswith("3D/Objects/a.stl")][0]
-            self.assertNotIn("paint_supports", z.read(name).decode())
+    def test_same_named_parts_keep_their_own_settings(self):
+        knob = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", knob),
+                                                          build3mf.PartSpec("knob.stl", knob)])]))
+        self.add_object_setting(knob, "wall_loops", "6")
+        spec, _ = self.reimported()
+        self.assertEqual([dict(p.object_meta).get("wall_loops") for p in spec.plates[0].parts], ["6", None])
 
     def test_seams_are_painted_and_replace_old_seams(self):
         calls = []
@@ -448,76 +474,6 @@ class BuildTest(unittest.TestCase):
         self.assertTrue(close(b.up, (0, 1, 0)))
         self.assertAlmostEqual(b.angle, math.radians(90), places=6)
 
-    def test_plate_settings_follow_the_name_when_reordered(self):
-        self.build()
-        text = self.settings_xml().replace(
-            '<metadata key="plater_name" value="first"/>',
-            '<metadata key="plater_name" value="first"/>\n'
-            '    <metadata key="curr_bed_type" value="Textured PEI Plate"/>')
-        self.replace_entry(reload3mf.MODEL_SETTINGS, text)
-        plates = self.spec().plates
-        self.build(self.spec([plates[1], plates[0]]))
-        text = self.settings_xml()
-        block = text[text.index('plater_name" value="first"'):text.index('</plate>',
-                                                                    text.index('plater_name" value="first"'))]
-        self.assertIn('curr_bed_type" value="Textured PEI Plate"', block)
-
-    def test_same_named_parts_that_differ_keep_nothing(self):
-        # Two knob.stl objects named the same on one plate with different settings: not sure which is which
-        tight = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
-        loose = self.write("knob", (10.4, 10.4, 10), (0, 0, 5), "loose")
-        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", tight),
-                                                          build3mf.PartSpec("knob.stl", loose)])]))
-        self.add_object_setting(tight, "wall_loops", "6")
-        parts = [build3mf.PartSpec("knob.stl", loose), build3mf.PartSpec("knob.stl", tight)]
-        self.build(self.spec([build3mf.PlateSpec("p", 5, parts)]))
-        self.assertNotIn('wall_loops', self.object_block(tight))
-        self.assertNotIn('wall_loops', self.object_block(loose))
-        self.assertEqual([p.mark for p in parts], ['ERROR', 'ERROR'])
-        self.assertIn("differ", parts[0].mark_note)
-
-    def test_same_named_parts_with_the_same_settings_keep_them(self):
-        # An object split with "Set as individual object": the same settings, whichever is taken
-        a = self.stls["a"]
-        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a, copies=1),
-                                                          build3mf.PartSpec("a.stl", a, copies=1)])]))
-        self.add_object_setting(a, "wall_loops", "6")
-        self.add_object_setting(a, "wall_loops", "6", nth=1)
-        parts = [build3mf.PartSpec("a.stl", a), build3mf.PartSpec("a.stl", a)]
-        self.build(self.spec([build3mf.PlateSpec("p", 5, parts)]))
-        self.assertEqual(self.settings_xml().count('wall_loops" value="6"'), 2)
-        self.assertEqual([p.mark for p in parts], ["", ""])
-
-    def test_settings_never_come_from_another_plate(self):
-        # The same knob on two plates; the plates swap names: each part keeps its own plate's settings only
-        knob = self.write("knob", (10, 10, 10), (0, 0, 5), "tight")
-        self.build(self.spec([build3mf.PlateSpec("one", 5, [build3mf.PartSpec("knob.stl", knob)]),
-                              build3mf.PlateSpec("two", 5, [build3mf.PartSpec("knob.stl", knob)])]))
-        self.add_object_setting(knob, "wall_loops", "6")  # the knob on plate "one"
-        parts = [build3mf.PartSpec("knob.stl", knob)]
-        self.build(self.spec([build3mf.PlateSpec("two", 5, parts), build3mf.PlateSpec("three", 5, [
-            build3mf.PartSpec("knob.stl", knob)])]))
-        self.assertNotIn('wall_loops', self.settings_xml())
-        self.assertEqual(parts[0].mark, "")
-
-    def test_objects_added_in_orca_are_kept_and_parts_taken_off_the_tab_dropped(self):
-        a, b = self.stls["a"], self.stls["b"]
-        # b stands for an object added in Orca: in the 3MF, but not in the tab
-        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a),
-                                                          build3mf.PartSpec("b.stl", b, (1, 0, 0), copies=2)])]))
-        self.add_object_setting(b, "wall_loops", "6")
-        lines = self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a)])]))
-        self.assertTrue(any("b.stl" in line and "kept from the 3MF" in line for line in lines), lines)
-        self.assertIn('wall_loops" value="6"', self.object_block(b))
-        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([os.path.join(self.dir, "stl")]))
-        kept = [p for p in plates[0][1] if p.name == "b.stl"][0]
-        self.assertEqual((kept.up, kept.copies), ((1.0, 0.0, 0.0), 2))  # stands as it stood, with its copies
-        # The tab made b before and no longer has it: dropped
-        spec = self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", a)])])
-        spec.known = {build3mf.object_key("p", "b.stl", b)}
-        self.build(spec)
-        self.assertNotIn('b.stl', self.settings_xml())
-
     def move_items(self, name, dx, dy):
         """Moves every copy of the object named `name` by dx, dy in the root model, as if dragged in Orca."""
         with zipfile.ZipFile(self.out) as z:
@@ -532,37 +488,62 @@ class BuildTest(unittest.TestCase):
         model = re.sub(r'(<item objectid="%s"[^>]*transform=")([^"]*)"' % oid, shift, model)
         self.replace_entry(reload3mf.ROOT_MODEL, model)
 
-    def test_keep_positions_keeps_matched_parts_and_nests_new_ones_around_them(self):
+    def test_copies_keep_their_spots_and_new_ones_are_nested_around_them(self):
         a, b, c = self.stls["a"], self.stls["b"], self.stls["c"]
         self.build(self.spec([build3mf.PlateSpec("one", 5, [build3mf.PartSpec("a.stl", a, copies=2)]),
                               build3mf.PlateSpec("two", 5, [build3mf.PartSpec("b.stl", b)])]))
         self.move_items("a.stl", 7.0, -3.0)
         self.move_items("b.stl", -11.0, 13.0)
         before = {n: sorted((lo, hi) for name, _, lo, hi in self.placed() if name == n) for n in ("a.stl", "b.stl")}
-        # The plates swap places, a gets a third copy, c is new; both plates keep positions
-        self.build(self.spec([build3mf.PlateSpec("two", 5, [build3mf.PartSpec("b.stl", b)], keep=True),
-                              build3mf.PlateSpec("one", 5, [build3mf.PartSpec("a.stl", a, copies=3),
-                                                            build3mf.PartSpec("c.stl", c, copies=4)], keep=True)]))
+        spec, _ = self.reimported()
+        self.assertEqual([len(p.parts[0].spots) for p in spec.plates], [2, 1])
+        self.assertTrue(all(s is not None for p in spec.plates for s in p.parts[0].spots))
+        # The plates swap places, a gets a third copy, c is new
+        one, two = spec.plates
+        one.parts[0].spots.append(None)
+        one.parts.append(build3mf.PartSpec("c.stl", c, copies=4))
+        self.build(build3mf.ProjectSpec(self.out, [two, one], "", profiles=spec.profiles))
         placed = self.placed()
         shift_one = layout.plate_origin(1, 2, (256, 256))[0] - layout.plate_origin(0, 2, (256, 256))[0]
-        got_a = sorted((lo, hi) for name, _, lo, hi in placed if name == "a.stl")
-        moved = sorted(((lo[0] + shift_one, lo[1], lo[2]), (hi[0] + shift_one, hi[1], hi[2])) for lo, hi in before["a.stl"])
+
         def same(p, m):
             return all(abs(x - y) < 1e-4 for x, y in zip(p[0] + p[1], m[0] + m[1]))
+        got_a = sorted((lo, hi) for name, _, lo, hi in placed if name == "a.stl")
+        moved = [((lo[0] + shift_one, lo[1], lo[2]), (hi[0] + shift_one, hi[1], hi[2])) for lo, hi in before["a.stl"]]
         self.assertEqual(sum(1 for m in moved if any(same(p, m) for p in got_a)), 2)  # both old copies stayed
         self.assertEqual(len(got_a), 3)
         got_b = [(lo, hi) for name, _, lo, hi in placed if name == "b.stl"]
-        old_b = before["b.stl"][0]
-        for x, y in zip(got_b[0][0] + got_b[0][1], (old_b[0][0] - shift_one,) + old_b[0][1:] + (old_b[1][0] - shift_one,) + old_b[1][1:]):
-            self.assertAlmostEqual(x, y, places=4)
-        # Nothing on plate "one" overlaps
+        (lo, hi), = before["b.stl"]
+        self.assertTrue(same(got_b[0], ((lo[0] - shift_one,) + lo[1:], (hi[0] - shift_one,) + hi[1:])))
+        # Nothing on plate "one" overlaps, and Build recorded every copy's spot
         boxes = [(lo, hi) for name, _, lo, hi in placed if name in ("a.stl", "c.stl")]
         self.assertEqual(len(boxes), 7)
         for i in range(len(boxes)):
             for j in range(i):
                 (l1, h1), (l2, h2) = boxes[i], boxes[j]
-                overlap = l1[0] < h2[0] - 1e-6 and l2[0] < h1[0] - 1e-6 and l1[1] < h2[1] - 1e-6 and l2[1] < h1[1] - 1e-6
+                overlap = (l1[0] < h2[0] - 1e-6 and l2[0] < h1[0] - 1e-6 and l1[1] < h2[1] - 1e-6
+                           and l2[1] < h1[1] - 1e-6)
                 self.assertFalse(overlap, (boxes[i], boxes[j]))
+        self.assertTrue(all(s is not None for p in one.parts for s in p.spots_out))
+        self.assertEqual([len(p.spots_out) for p in one.parts], [3, 4])
+        # Built again from the recorded spots, nothing moves
+        for p in one.parts + two.parts:
+            p.spots = list(p.spots_out)
+        self.build(build3mf.ProjectSpec(self.out, [two, one], "", profiles=spec.profiles))
+        again = self.placed()
+        for name, _, lo, hi in placed:
+            self.assertTrue(any(n == name and same((l, h), (lo, hi)) for n, _, l, h in again), name)
+
+    def test_a_copy_keeps_its_own_turn(self):
+        a = self.stls["a"]
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec(
+            "a.stl", a, spots=[(60.0, 60.0, 0.0), (180.0, 180.0, math.radians(90))])])]))
+        sizes = sorted(tuple(round(h - l, 4) for h, l in zip(hi[:2], lo[:2])) for _, _, lo, hi in self.placed())
+        self.assertEqual(sizes, [(20.0, 40.0), (40.0, 20.0)])
+        spec, _ = self.reimported()
+        spots = spec.plates[0].parts[0].spots
+        self.assertTrue(close(spots[0], (60.0, 60.0, 0.0), 1e-3), spots)
+        self.assertTrue(close(spots[1], (180.0, 180.0, math.radians(90)), 1e-3), spots)
 
     def test_part_taller_than_printable_height_is_reported(self):
         make_template(self.template, printable_height="30")
@@ -592,9 +573,8 @@ class BuildTest(unittest.TestCase):
                 dst.writestr(name, data.encode("utf-8") if isinstance(data, str) else data)
         os.replace(tmp, self.out)
 
-    def test_extra_volumes_and_index_files_survive_rebuild(self):
+    def test_modifiers_and_layer_files_are_named_as_not_kept(self):
         self.build()
-        base = self.spec()
         root = zipfile.ZipFile(self.out).read(reload3mf.ROOT_MODEL).decode()
         cfg = self.settings_xml()
 
@@ -639,24 +619,13 @@ class BuildTest(unittest.TestCase):
                 '  <mode value="SingleExtruder"/>\n </plate>\n</custom_gcodes_per_layer>\n',
         })
 
-        # Swap the plates: c (old 3) -> 1, a (old 1) -> 2, b (old 2) -> 3; plate "second" -> position 1
-        self.build(self.spec([base.plates[1], base.plates[0]]))
-        with zipfile.ZipFile(self.out) as z:
-            out_root = z.read(reload3mf.ROOT_MODEL).decode()
-            out_cfg = z.read(reload3mf.MODEL_SETTINGS).decode()
-            layer = z.read("Metadata/layer_heights_profile.txt").decode()
-            ranges = z.read("Metadata/layer_config_ranges.xml").decode()
-            brim = z.read("Metadata/brim_ear_points.txt").decode()
-            gcode = z.read("Metadata/custom_gcode_per_layer.xml").decode()
-        self.assertIn('transform="1 0 0 0 1 0 0 0 1 5 5 5"', out_root)
-        self.assertEqual(out_root.count('<component '), 4)  # 3 main + 1 extra
-        self.assertIn('subtype="modifier_part"', out_cfg)
-        self.assertIn('wall_loops" value="9"', out_cfg)
-        self.assertEqual(out_cfg.count('<part '), 4)
-        self.assertIn("id=3|0.1;0.1;0.1;0.1;0.1;0.1", layer)
-        self.assertIn('<object id="3"', ranges)
-        self.assertIn("object_id=1|1 2 3 0.5 4 5 6 0.5", brim)
-        self.assertIn('<plate_info id="1"', gcode)
+        imported, problems = build3mf.read_project(self.out, reload3mf.SourceFinder([self.dir]))
+        self.assertEqual(problems, [])
+        self.assertEqual([p.name for p in imported.plates[0].parts], ["a.stl", "b.stl"])  # a, without its modifier
+        text = "\n".join(imported.dropped)
+        self.assertIn("a.stl: 1 modifier not kept", text)
+        self.assertIn("variable layer heights", text)
+        self.assertIn("custom G-code", text)
 
     def test_common_folder(self):
         self.assertEqual(build3mf.common_folder(["GripV/parts/a.stl", "GripV/parts/x/b.stl"]), "GripV/parts")

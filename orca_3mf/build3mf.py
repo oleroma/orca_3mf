@@ -1,10 +1,12 @@
 """Builds OrcaSlicer projects (.3mf) from projects > plates > parts, each part an STL file with an up axis, a turn
-around it and a number of copies. Each part is stood up, nested on its plate with the plate's gap and put on the bed.
+around it and its copies. Each copy stands where the tab says (its spot), or is nested on its plate with the plate's
+gap, around the placed ones.
 
-Building over an existing project keeps what only Orca holds: the printer, process and filament settings, each
-part's own settings (matched by name), each plate's settings (by position), and the painting of a part whose shape
-did not change (its seams are replaced when it has a seam line). A new project takes its settings from a template
-project: Orca opens a project without settings as bare geometry, without its plates, so one is needed.
+Everything comes from the tab: the meshes from the STLs, seams from seam lines, and the printer, process and
+filament settings, each plate's and each part's Orca settings as Import saved them. The old 3MF is never read, so
+Orca's painting, modifiers and layer height edits are not carried over. A project that was never imported takes
+its settings from a template project: Orca opens a project without settings as bare geometry, without its plates,
+so one is needed.
 
 Only the Python standard library is used, so it runs inside and outside Blender.
 """
@@ -50,8 +52,6 @@ def _axis_aligned_rectangle(points):
 # Settings files that travel with the printer, process and filament settings
 SETTINGS_FILES = re.compile(r"Metadata/(project_settings\.config|print_profile\.config|"
                             r"(print_setting|process_settings|filament_settings|machine_settings)_.*)$")
-# Files of an existing project that are kept as they are
-KEPT_FILES = re.compile(r"(Metadata/custom_gcode_per_layer\.xml|Auxiliaries/(?!\.thumbnails/).*)$")
 # Part settings Orca writes itself; the others are the part's own settings and are kept
 PART_KEYS = {"name", "matrix", "source_file", "source_object_id", "source_volume_id", "source_offset_x",
              "source_offset_y", "source_offset_z", "source_in_inches", "source_in_meters"}
@@ -68,63 +68,58 @@ CUSTOM_GCODE_FILE = "Metadata/custom_gcode_per_layer.xml"
 
 class PartSpec:
     """One part: the STL file (absolute path), the direction of the part that points up on the plate, the turn
-    around it (radians), how many copies, a mirror across the part's own X axis, an optional seam function
-    (stl_path, Mesh) -> None or (paint_seam strings by triangle index, note for the report), and the STL path written
-    into the project as its source_file (default: the absolute path; relative paths start at the 3MF's folder)."""
+    around it (radians), its copies, a mirror across the part's own X axis, an optional seam function
+    (stl_path, Mesh) -> None or (paint_seam strings by triangle index, note for the report), the STL path written
+    into the project as its source_file (default: the absolute path; relative paths start at the 3MF's folder),
+    and the object's and part's own Orca settings ([(key, value)], saved by Import).
 
-    def __init__(self, name, stl, up=(0.0, 0.0, 1.0), angle=0.0, copies=1, seam=None, mirror=False, source=None):
+    spots: one entry per copy, (x, y, turn) of where it stands (the centre of its footprint from the plate's front
+    left corner, mm, and a turn in radians on top of the part's own) or None for a copy without a place yet, which
+    Build nests around the placed ones. Build fills spots_out with where every copy went."""
+
+    def __init__(self, name, stl, up=(0.0, 0.0, 1.0), angle=0.0, copies=1, seam=None, mirror=False, source=None,
+                 spots=None, object_meta=(), part_meta=()):
         self.name = name or os.path.basename(stl)
         self.stl = stl
         self.source = source or stl
         self.up = tuple(up)
         self.angle = angle
-        self.copies = max(int(copies), 1)
+        self.spots = list(spots) if spots else [None] * max(int(copies), 1)
+        self.copies = len(self.spots)
         self.seam = seam
         self.mirror = bool(mirror)
-        self.mark = ""  # set by Build: 'WARNING' or 'ERROR' when its Orca settings were not kept
-        self.mark_note = ""
+        self.object_meta = [(k, v) for k, v in object_meta if k != "name"]
+        self.part_meta = [(k, v) for k, v in part_meta if k not in PART_KEYS]
+        self.spots_out = []
 
 
 class PlateSpec:
-    """A plate: its name, the gap between its parts, its parts, and whether parts found in the old project keep
-    where they stood on it (keep: only new parts and new copies are nested, around them)."""
+    """A plate: its name, the gap between its parts, its parts and its own Orca settings ([(key, value)])."""
 
-    def __init__(self, name="", gap=6.0, parts=(), keep=False):
+    def __init__(self, name="", gap=6.0, parts=(), meta=()):
         self.name = name
         self.gap = gap
         self.parts = list(parts)
-        self.keep = keep
+        self.meta = [(k, v) for k, v in meta if k not in PLATE_KEYS]
 
 
 class ProjectSpec:
-    """A project: its 3MF file (absolute path; Build writes out_path, the same file unless given), its plates, a template project for the settings of a new
-    project, the bed size used when no settings come with it, and how the report shows a path (default: as it is)."""
+    """A project: its 3MF file (absolute path; Build writes out_path, the same file unless given), its plates, the
+    printer, process and filament settings Import saved (profiles: {file in the 3MF: text}, with the 3MF's
+    metadata) or else a template project to take them from, the bed size used when there are none, and how the
+    report shows a path (default: as it is). The old 3MF itself is never read."""
 
-    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None, out_path=None, known=()):
+    def __init__(self, path, plates=(), template="", bed=(256.0, 256.0), shown=None, out_path=None, profiles=None,
+                 metadata=None, profiles_from=""):
         self.path = path
         self.out_path = out_path or path  # where Build writes: the project itself, or a numbered build of it
-        # (plate key, object name, STL file name in lower case) of the objects the tab made or knows: an old
-        # object no part takes is dropped when known (taken off the tab), else kept (added in Orca)
-        self.known = set(known)
         self.shown = shown or (lambda p: p)
         self.plates = list(plates)
         self.template = template
         self.bed = tuple(bed)
-
-
-# --------------------------------------------------------------------------
-# What an existing project or a template brings
-
-
-class _OldObject:
-    def __init__(self, oid, name, meta, part, plates=(), extras=(), index=0):
-        self.id = oid
-        self.name = name
-        self.meta = meta  # object settings, [(key, value)] without the name
-        self.part = part  # reload3mf.Part of its one model part, or None
-        self.plates = frozenset(plates)  # plate names it sits on
-        self.extras = list(extras)  # reload3mf.Parts of its extra volumes (modifiers, negatives, blockers, ...)
-        self.index = index  # 1-based position in the old model
+        self.profiles = dict(profiles or {})
+        self.metadata = dict(metadata or {})
+        self.profiles_from = profiles_from  # the 3MF they were imported from, for the report
 
 
 def next_build_path(path, folder="3mf_builds"):
@@ -138,136 +133,59 @@ def next_build_path(path, folder="3mf_builds"):
     return os.path.join(out_dir, "%s_%03d.3mf" % (stem, max(numbers, default=0) + 1))
 
 
-def plate_key(name, position):
-    """How a plate is told apart: its name, or its position (from 0) when it has none."""
-    return name if name else "#%d" % position
+def latest_build_path(path, folder="3mf_builds"):
+    """The newest numbered build of a project, or None."""
+    nxt = next_build_path(path, folder)
+    number = int(re.search(r"_(\d+)\.3mf$", nxt).group(1)) - 1
+    if number < 1:
+        return None
+    out_dir = os.path.dirname(nxt)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    pattern = re.compile(re.escape(stem) + r"_0*%d\.3mf$" % number, re.IGNORECASE)
+    return next((os.path.join(out_dir, n) for n in sorted(os.listdir(out_dir)) if pattern.match(n)), None)
 
 
-def _settings_key(obj):
-    """What two old objects must share to give the same Orca settings."""
-    part = obj.part.meta if obj.part is not None else {}
-    return (tuple(sorted(obj.meta)), tuple(sorted((k, v) for k, v in part.items() if k not in PART_KEYS)),
-            tuple(sorted(tuple(sorted(p.meta.items())) for p in obj.extras)))
+def _decode(data):
+    return data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
+
+
+def read_profiles(z):
+    """({settings file: text}, {metadata name: value}) of an open 3MF zip: the printer, process and filament
+    settings, and the Orca version that wrote them."""
+    files = {name: _decode(z.read(name)) for name in z.namelist() if SETTINGS_FILES.match(name)}
+    metadata = {}
+    try:
+        root = ET.fromstring(z.read(reload3mf.ROOT_MODEL))
+    except (KeyError, ET.ParseError):
+        root = None
+    if root is not None:
+        for m in root.findall(reload3mf.CORE_NS + "metadata"):
+            if m.get("name") in ("Application", "OrcaSlicer") and m.text:
+                metadata[m.get("name")] = m.text
+    return files, metadata
 
 
 class Base:
-    """The settings a build starts from: an existing project (everything below), else a template (its settings
-    files only), else nothing."""
+    """The printer, process and filament settings a build writes: the ones Import saved, else a template
+    project's, else none."""
 
-    def __init__(self, path=None, template=None):
+    def __init__(self, profiles=None, template=None, metadata=None, profiles_from=""):
         self.settings_from = None
         self.files = {}  # zip entry -> bytes, written as they are
         self.metadata = {"Application": APPLICATION, "OrcaSlicer": ORCA_VERSION, "BambuStudio:3mfVersion": "1"}
-        self.objects = []  # [_OldObject], in file order
-        self.plates = []  # [(name, [(key, value)])] of each plate, in file order
-        self._plate_taken = set()
-        self.dropped = []  # warnings about old objects a build leaves out
-        self.project = None
-        if path and os.path.isfile(path):
-            self._read_project(path)
-            if SETTINGS not in self.files and template:
-                # An existing file without printer settings still needs them: take them from Settings from,
-                # keeping the file's own metadata.
-                if not os.path.isfile(template):
-                    raise ReloadError("settings project not found: %s" % template)
-                with zipfile.ZipFile(template) as z:
-                    self._take_settings(z, template, update_metadata=False)
+        if profiles and SETTINGS in profiles:
+            self.files = {k: v.encode("utf-8") if isinstance(v, str) else v for k, v in profiles.items()}
+            self.metadata.update(metadata or {})
+            self.settings_from = profiles_from or "the saved settings"
         elif template:
             if not os.path.isfile(template):
                 raise ReloadError("settings project not found: %s" % template)
             with zipfile.ZipFile(template) as z:
-                self._take_settings(z, template)
-
-    def _take_settings(self, z, path, update_metadata=True):
-        for name in z.namelist():
-            if SETTINGS_FILES.match(name):
-                self.files[name] = z.read(name)
-        if SETTINGS not in self.files:
-            return
-        self.settings_from = path
-        if not update_metadata:
-            return
-        # The settings were written by this Orca version: say so, or Orca may warn about a newer file
-        try:
-            root = ET.fromstring(z.read(reload3mf.ROOT_MODEL))
-        except (KeyError, ET.ParseError):
-            return
-        for m in root.findall(reload3mf.CORE_NS + "metadata"):
-            if m.get("name") in ("Application", "OrcaSlicer") and m.text:
-                self.metadata[m.get("name")] = m.text
-
-    def _read_project(self, path):
-        project = reload3mf.Project(path)
-        self.project = project
-        z = project.zip
-        self._take_settings(z, path)
-        for name in z.namelist():
-            if KEPT_FILES.match(name) or name in INDEX_OBJECT_FILES:
-                self.files[name] = z.read(name)
-        root = ET.fromstring(z.read(reload3mf.ROOT_MODEL))
-        for m in root.findall(reload3mf.CORE_NS + "metadata"):
-            if m.get("name") in ("Title", "Designer", "Description", "Copyright", "License", "Origin",
-                                 "CreationDate"):
-                self.metadata[m.get("name")] = m.text or ""
-        settings = ET.fromstring(z.read(reload3mf.MODEL_SETTINGS))
-        plate_names = {}
-        for plate in settings.findall("plate"):
-            pmeta = {m.get("key"): m.get("value") for m in plate.findall("metadata") if m.get("key")}
-            name = pmeta.get("plater_name") or ""
-            self.plates.append((name, [(k, v) for k, v in pmeta.items() if k not in PLATE_KEYS]))
-            try:
-                plate_names[int(pmeta["plater_id"])] = plate_key(name, int(pmeta["plater_id"]) - 1)
-            except (KeyError, ValueError):
-                pass
-        model_order = {oid: i + 1 for i, oid in enumerate(getattr(project, "model_order", ()))}
-        for o in settings.findall("object"):
-            obj = project.objects.get(o.get("id"))
-            meta = [(m.get("key"), m.get("value")) for m in o.findall("metadata")
-                    if m.get("key") and m.get("key") != "name"]
-            models = [p for p in obj.parts if p.is_model_part] if obj else []
-            part = models[0] if len(models) == 1 else None
-            extras = [p for p in obj.parts if not p.is_model_part] if obj else []
-            name = obj.name if obj else o.get("id")
-            on = (plate_names[i] for i in getattr(obj, "plates", ()) if i in plate_names) if obj else ()
-            self.objects.append(_OldObject(o.get("id"), name, meta, part, on, extras,
-                                           model_order.get(o.get("id"), 0)))
-
-    def take_plate(self, name, position):
-        """The old plate settings for `name` (once each); a plate without a name takes the unnamed old plate at its
-        position; else a fresh plate."""
-        for i in range(len(self.plates)):
-            if i not in self._plate_taken and name and self.plates[i][0] == name:
-                self._plate_taken.add(i)
-                return self.plates[i][1]
-        if (not name and 0 <= position < len(self.plates) and position not in self._plate_taken
-                and not self.plates[position][0]):
-            self._plate_taken.add(position)
-            return self.plates[position][1]
-        return [("locked", "false")]
-
-    def take_part(self, spec, plate_name, plate_no):
-        """(old object or None, mark, note): the old object whose Orca settings the part keeps. Exact matches only,
-        never by shape or order and never from another plate: an object on the same plate (by name; a plate without
-        a name by its position) with the same STL file name and the same object name. Several such objects are
-        taken only when their settings are the same (an object split with "Set as individual object"); mark is ""
-        when kept, else 'WARNING' (a new part) or 'ERROR' (not sure)."""
-        key = plate_key(plate_name, plate_no)
-        file_name = os.path.basename((spec.source or spec.stl).replace("\\", "/")).lower()
-        on_plate = [o for o in self.objects if key in o.plates and o.part is not None
-                    and os.path.basename(o.part.source.replace("\\", "/")).lower() == file_name]
-        same = [o for o in on_plate if o.name == spec.name]
-        if not same:
-            if on_plate:
-                return None, 'ERROR', ("Orca settings not kept: %s is on this plate under another name (%s)"
-                                       % (file_name, ", ".join(sorted({o.name for o in on_plate}))))
-            if self.project is not None:
-                return None, 'WARNING', "new part: Orca's default settings"
-            return None, "", ""
-        if len(same) > 1 and len({_settings_key(o) for o in same}) > 1:
-            return None, 'ERROR', ("Orca settings not kept: %d objects named %s on this plate differ, rename them "
-                                   "in Orca" % (len(same), spec.name))
-        self.objects.remove(same[0])
-        return same[0], "", ""
+                files, meta = read_profiles(z)
+            if SETTINGS in files:
+                self.files = {k: v.encode("utf-8") for k, v in files.items()}
+                self.metadata.update(meta)
+                self.settings_from = template
 
     def settings(self):
         if SETTINGS not in self.files:
@@ -308,10 +226,6 @@ class Base:
             warnings.append("the printable area is not a rectangle; parts are nested on its bounding box")
         return warnings
 
-    def close(self):
-        if self.project is not None:
-            self.project.close()
-
 
 # --------------------------------------------------------------------------
 # Building
@@ -323,30 +237,15 @@ class _Object:
     def __init__(self, spec, plate_no):
         self.spec = spec
         self.plate_no = plate_no
-        self.mesh = None  # stored mesh, centred on its bounding box like Orca stores it
+        self.mesh = None  # the STL's mesh, centred on its bounding box like Orca stores it
         self.offset = None  # STL coordinates of the stored mesh's origin
-        self.extras = {}  # per-triangle painting
-        self.old = None
+        self.extras = {}  # per-triangle seam painting
         self.rotation = None
         self.lo = self.hi = None
         self.transforms = []  # (rows, translation) of each copy
         self.notes = []
         self.id = None  # the object's <object id> in the root model
         self.sub_id = None  # the main volume's sub-model <object id>
-        self.extra_volumes = []  # _ExtraVolume list (modifiers, negatives, blockers carried over)
-        self.mark = ""  # 'WARNING' or 'ERROR' when its Orca settings were not kept, with mark_note saying why
-        self.mark_note = ""
-
-
-class _ExtraVolume:
-    """One extra volume of an object, copied over from its old project."""
-
-    def __init__(self, part, transform, mesh_text, raw_part):
-        self.part = part
-        self.transform = transform  # (rows, translation), re-anchored to the new main volume
-        self.mesh_text = mesh_text  # <mesh>...</mesh> from the old sub-model
-        self.raw_part = raw_part  # old <part id=... subtype=...>...</part>, with its id not re-numbered yet
-        self.sub_id = None  # new sub-model <object id>
 
 
 def _load(spec, stl_cache):
@@ -356,184 +255,28 @@ def _load(spec, stl_cache):
     return stl_cache[key]
 
 
-def _carry_extras(base, old_obj, anchor):
-    """Copies the old object's extra volumes (modifiers, negatives, blockers, ...) for the rebuilt object.
-
-    anchor is the transform to re-anchor each volume's component transform onto the new main volume
-    (Cm^-1 * Cn: the old main volume's component transform inverted, then the new one applied; our new one is
-    always identity, so this is the old main's inverse)."""
-    project = base.project
-    settings_text = project.text(reload3mf.MODEL_SETTINGS)
-    try:
-        o_start, o_end = reload3mf._block(settings_text, "object", old_obj.id, 0, len(settings_text))
-    except ReloadError:
-        return []
-    out = []
-    for part in old_obj.extras:
-        if part.model_path is None:
-            continue
-        try:
-            model_text = project.text(part.model_path)
-            m_start, m_end = reload3mf.find_mesh(model_text, part.sub_id)
-            p_start, p_end = reload3mf._block(settings_text, "part", part.id, o_start, o_end)
-        except (ReloadError, KeyError):
-            continue
-        transform = reload3mf.compose(anchor, reload3mf.parse_transform(part.transform))
-        out.append(_ExtraVolume(part, transform, model_text[m_start:m_end], settings_text[p_start:p_end]))
-    return out
-
-
-def _prepare(obj, base, stl_cache, plate_name, plate_no=0):
+def _prepare(obj, stl_cache):
     spec = obj.spec
     stl, _ = _load(spec, stl_cache)  # degenerate triangles are dropped, as Orca's own import does
-    seam = spec.seam(spec.stl, stl) if spec.seam else None
-    obj.old, obj.mark, obj.mark_note = base.take_part(spec, plate_name, plate_no)
-    spec.mark, spec.mark_note = obj.mark, obj.mark_note  # for the tab
-    obj.extra_volumes = []
-    if obj.old is not None and obj.old.extras and obj.old.part is not None:
-        try:
-            anchor = reload3mf.invert(reload3mf.parse_transform(obj.old.part.transform))
-            obj.extra_volumes = _carry_extras(base, obj.old, anchor)
-        except ReloadError:
-            obj.extra_volumes = []
     center = stl.center()
-    old_part = obj.old.part if obj.old else None
-    old = None
-    if old_part is not None:
-        try:
-            old = base.project.old_mesh(old_part)
-        except ReloadError:
-            old = None
-    if old is not None and reload3mf.same_shape(old, stl, (0.0, 0.0, 0.0),
-                                                tuple(o - s for o, s in zip(old.center(), center))):
-        # Same shape, so the same triangles in the same order: keep the stored mesh and its painting.
-        obj.mesh = old
-        obj.extras = {i: dict(a) for i, a in old_part.extras.items()}
-        obj.offset = tuple(c - o for c, o in zip(center, old.center()))
-    else:
-        obj.mesh = stl.translated(tuple(-c for c in center))
-        obj.offset = center
-        if old_part is not None and old_part.extras:
-            obj.notes.append("painting removed, the shape changed")
+    obj.mesh = stl.translated(tuple(-c for c in center))
+    obj.offset = center
+    obj.extras = {}
+    seam = spec.seam(spec.stl, stl) if spec.seam else None
     if seam is not None:
         strings, note = seam
-        for a in obj.extras.values():
-            a.pop(SEAM_ATTR, None)
         for i, value in strings.items():
-            obj.extras.setdefault(i, {})[SEAM_ATTR] = value
+            obj.extras[i] = {SEAM_ATTR: value}
         obj.notes.append(note)
-    obj.extras = {i: a for i, a in obj.extras.items() if a}
     obj.rotation = layout.orientation(spec.up, spec.angle)
     if spec.mirror:
         obj.rotation = layout.matmul(obj.rotation, MIRROR)
     obj.lo, obj.hi = layout.footprint(obj.mesh.verts, obj.rotation)
 
 
-def _prepare_kept(obj, base):
-    """An object of the old project that no part of the tab took (added in Orca): kept as it is, with its stored
-    mesh, painting, settings, extra volumes, copies and how it stood; only nested again with the others."""
-    old = obj.old
-    project_obj = base.project.objects[old.id]
-    item = base.project.items[project_obj.items[0]] if project_obj.items else None
-    rows, _ = reload3mf.compose(reload3mf.parse_transform(item[1] if item else None),
-                                reload3mf.parse_transform(old.part.transform))
-    mirror = layout.det(rows) < 0.0
-    if mirror:
-        rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
-    up, angle = layout.orientation_from_matrix(rows)
-    spec = obj.spec
-    spec.up, spec.angle, spec.mirror = up, angle, mirror
-    spec.copies = max(1, len(project_obj.items))
-    obj.mesh = base.project.old_mesh(old.part)
-    obj.extras = {i: dict(a) for i, a in old.part.extras.items() if a}
-    meta = old.part.meta
-    try:
-        obj.offset = tuple(float(meta.get("source_offset_" + a, 0.0)) for a in "xyz")
-    except ValueError:
-        obj.offset = (0.0, 0.0, 0.0)
-    if old.extras:
-        try:
-            anchor = reload3mf.invert(reload3mf.parse_transform(old.part.transform))
-            obj.extra_volumes = _carry_extras(base, old, anchor)
-        except ReloadError:
-            obj.extra_volumes = []
-    obj.notes.append("kept from the 3MF: not in the tab")
-    obj.rotation = layout.orientation(up, angle)
-    if mirror:
-        obj.rotation = layout.matmul(obj.rotation, MIRROR)
-    obj.lo, obj.hi = layout.footprint(obj.mesh.verts, obj.rotation)
-
-
-def object_key(plate_key_, name, source):
-    """How the tab remembers an object it made: (plate key, object name, STL file name in lower case)."""
-    return (plate_key_, name, os.path.basename((source or "").replace("\\", "/")).lower())
-
-
-def _kept_objects(base, plate, plate_no, known, warnings):
-    """_Objects for the old objects on this plate that no part took and the tab never made (added in Orca), taken
-    out of base. One from the STL of a part of the plate stands for that part (its settings were not sure, the
-    part is marked red), so it is not kept as well."""
-    if base.project is None:
-        return []
-    key = plate_key(plate.name, plate_no)
-    files = {os.path.basename((p.source or p.stl).replace("\\", "/")).lower() for p in plate.parts}
-    out = []
-    for old in [o for o in base.objects if key in o.plates]:
-        base.objects.remove(old)
-        source = old.part.source if old.part else ""
-        if object_key(key, old.name, source) in known:
-            continue  # taken off the tab: dropped
-        if os.path.basename(source.replace("\\", "/")).lower() in files:
-            warnings.append("plate %d, %s: replaced by the tab's part of the same STL, its Orca settings not kept"
-                            % (plate_no + 1, old.name))
-            continue
-        if old.part is None:
-            warnings.append("plate %d, %s: added in Orca, but an object of several parts can't be kept: dropped"
-                            % (plate_no + 1, old.name))
-            continue
-        source = old.part.source or old.name
-        obj = _Object(PartSpec(old.name, source, source=source), plate_no)
-        obj.old = old
-        try:
-            _prepare_kept(obj, base)
-        except (ReloadError, KeyError, IndexError, ValueError) as e:
-            warnings.append("plate %d, %s: added in Orca, can't be kept (%s): dropped" % (plate_no + 1, old.name, e))
-            continue
-        out.append(obj)
-    return out
-
-
-def _old_spots(obj, base, plate_name, plate_no, bed_corner, grid):
-    """Where the copies of obj's old object stood, as (x, y) centres of their footprints on the plate (from its
-    front left corner, like nest's positions), at most as many as the part has copies. The plate may have moved
-    in the grid: the spots move with it."""
-    old = obj.old
-    if old is None or old.part is None or base.project is None:
-        return []
-    project_obj = base.project.objects.get(old.id)
-    if project_obj is None:
-        return []
-    key = plate_key(plate_name, plate_no)
-    index = next((i for i, (name, _) in enumerate(base.plates) if plate_key(name, i) == key), None)
-    if index is None:
-        return []
-    old_x, old_y = layout.plate_origin(index, len(base.plates), grid)
-    try:
-        mesh = base.project.old_mesh(old.part)
-    except ReloadError:
-        return []
-    part = reload3mf.parse_transform(old.part.transform)
-    bed_x0, bed_y0 = bed_corner
-    spots = []
-    for item_index in project_obj.items[:obj.spec.copies]:
-        rows, t = reload3mf.compose(reload3mf.parse_transform(base.project.items[item_index][1]), part)
-        lo, hi = layout.footprint(mesh.verts, rows)
-        spots.append((t[0] + (lo[0] + hi[0]) / 2.0 - old_x - bed_x0, t[1] + (lo[1] + hi[1]) / 2.0 - old_y - bed_y0))
-    return spots
-
-
 def plan(spec, base, stl_cache=None):
-    """Works out every object of the project and where its copies go. Returns (objects, problems, bed)."""
+    """Works out every object of the project and where its copies go: a copy with a spot stands there, the
+    others are nested around them. Returns (objects, problems, bed)."""
     stl_cache = {} if stl_cache is None else stl_cache
     bed = base.bed(spec.bed)
     x0, y0, width, depth = bed
@@ -548,42 +291,44 @@ def plan(spec, base, stl_cache=None):
         for part in plate.parts:
             obj = _Object(part, plate_no)
             try:
-                _prepare(obj, base, stl_cache, plate.name, plate_no)
+                _prepare(obj, stl_cache)
             except (ReloadError, OSError, ValueError) as e:
                 problems.append("plate %d, %s: %s" % (plate_no + 1, part.name, e))
                 continue
             plate_objects.append(obj)
-        plate_objects += _kept_objects(base, plate, plate_no, spec.known, base.dropped)
         ox, oy = layout.plate_origin(plate_no, count, grid)
-        blocked = []
-        kept_copies = {}
-        if plate.keep:
-            for obj in plate_objects:
-                spots = _old_spots(obj, base, plate.name, plate_no, (x0, y0), grid)
-                kept_copies[id(obj)] = len(spots)
-                for cx, cy in spots:
-                    lo_x = cx - (obj.hi[0] - obj.lo[0]) / 2.0
-                    lo_y = cy - (obj.hi[1] - obj.lo[1]) / 2.0
-                    blocked.append((lo_x, lo_y, obj.hi[0] - obj.lo[0], obj.hi[1] - obj.lo[1]))
-                    obj.transforms.append((obj.rotation, (ox + x0 + lo_x - obj.lo[0], oy + y0 + lo_y - obj.lo[1],
-                                                          -obj.lo[2])))
-        sizes, owners = [], []
+        blocked, sizes, owners = [], [], []
         for obj in plate_objects:
-            size = (obj.hi[0] - obj.lo[0], obj.hi[1] - obj.lo[1])
-            for _ in range(obj.spec.copies - kept_copies.get(id(obj), 0)):
-                sizes.append(size)
-                owners.append(obj)
+            spots = obj.spec.spots
+            obj.transforms = [None] * len(spots)
+            obj.spec.spots_out = [None] * len(spots)
+            for k, spot in enumerate(spots):
+                if spot is None:
+                    sizes.append((obj.hi[0] - obj.lo[0], obj.hi[1] - obj.lo[1]))
+                    owners.append((obj, k))
+                    continue
+                x, y, turn = spot
+                rows = layout.matmul(layout.rot_z(turn), obj.rotation) if turn else obj.rotation
+                lo, hi = layout.footprint(obj.mesh.verts, rows) if turn else (obj.lo, obj.hi)
+                w, d = hi[0] - lo[0], hi[1] - lo[1]
+                blocked.append((x - w / 2.0, y - d / 2.0, w, d))
+                obj.transforms[k] = (rows, (ox + x0 + x - (lo[0] + hi[0]) / 2.0,
+                                            oy + y0 + y - (lo[1] + hi[1]) / 2.0, -lo[2]))
+                obj.spec.spots_out[k] = (x, y, turn)
         positions, left_out = layout.nest(sizes, (width, depth), plate.gap, blocked=blocked)
         for i in left_out:
-            obj = owners[i]
+            obj = owners[i][0]
             problems.append("plate %d, %s: does not fit on the plate (%.1f x %.1f mm with a %.1f mm gap)"
                             % (plate_no + 1, obj.spec.name, sizes[i][0], sizes[i][1], plate.gap))
         for i, pos in enumerate(positions):
             if pos is None:
                 continue
-            obj = owners[i]
-            t = (ox + x0 + pos[0] - obj.lo[0], oy + y0 + pos[1] - obj.lo[1], -obj.lo[2])
-            obj.transforms.append((obj.rotation, t))
+            obj, k = owners[i]
+            obj.transforms[k] = (obj.rotation, (ox + x0 + pos[0] - obj.lo[0], oy + y0 + pos[1] - obj.lo[1],
+                                                -obj.lo[2]))
+            obj.spec.spots_out[k] = (pos[0] + sizes[i][0] / 2.0, pos[1] + sizes[i][1] / 2.0, 0.0)
+        for obj in plate_objects:
+            obj.transforms = [t for t in obj.transforms if t is not None]
         objects += [obj for obj in plate_objects if obj.transforms]
     return objects, problems, bed
 
@@ -610,67 +355,8 @@ def _meta_line(indent, key, value):
     return '%s<metadata key=%s value=%s/>\n' % (indent, quoteattr(key), quoteattr(str(value)))
 
 
-def _xml_text(root):
-    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode")
-
-
-def _remap_txt_object_ids(data, remap):
-    out = []
-    for line in data.split("\n"):
-        m = re.match(r"\s*(?:id|object_id)=(\d+)(\|.*)?$", line)
-        if m and int(m.group(1)) in remap:
-            key = "id" if line.lstrip().startswith("id=") else "object_id"
-            line = "%s=%d%s" % (key, remap[int(m.group(1))], m.group(2) or "")
-        out.append(line)
-    return "\n".join(out)
-
-
-def _remap_positioned_files(files, remap_obj, plate_remap):
-    """Re-keys the position-addressed files (object index for the layer/profile/brim files, plate index for
-    custom G-code) to the new object and plate order, in place."""
-    for name in INDEX_OBJECT_FILES:
-        if name not in files:
-            continue
-        if name.endswith(".xml"):
-            try:
-                root = ET.fromstring(files[name])
-            except (ET.ParseError, ValueError):
-                continue
-            for obj in root.findall("object"):
-                oid = obj.get("id")
-                if oid and int(oid) in remap_obj:
-                    obj.set("id", str(remap_obj[int(oid)]))
-            files[name] = _xml_text(root)
-        else:
-            files[name] = _remap_txt_object_ids(files[name].decode("utf-8"), remap_obj)
-    if CUSTOM_GCODE_FILE in files:
-        try:
-            root = ET.fromstring(files[CUSTOM_GCODE_FILE])
-            for plate in root.findall("plate"):
-                info = plate.find("plate_info")
-                if info is not None:
-                    pid = info.get("id")
-                    if pid and int(pid) in plate_remap:
-                        info.set("id", str(plate_remap[int(pid)]))
-            files[CUSTOM_GCODE_FILE] = _xml_text(root)
-        except (ET.ParseError, ValueError):
-            pass
-
-
 def write(spec, base, objects, out_path):
     """Writes the project to out_path (through a temporary file, so a failed write leaves the old file)."""
-    remap_obj = {}
-    for i, obj in enumerate(objects, 1):
-        if obj.old is not None and obj.old.index:
-            remap_obj[obj.old.index] = i
-    new_plate_pos = {}
-    for i, plate in enumerate(spec.plates, 1):
-        new_plate_pos.setdefault(plate.name, i)
-    plate_remap = {}
-    for old_pos, (name, _) in enumerate(base.plates, 1):
-        if name in new_plate_pos:
-            plate_remap[old_pos] = new_plate_pos[name]
-
     files = {}
     root = [_model_head()]
     for key, value in base.metadata.items():
@@ -690,23 +376,11 @@ def write(spec, base, objects, out_path):
                "   ", reload3mf.mesh_xml(obj.mesh, "   ", obj.extras), "\n  </object>\n </resources>\n"
                " <build/>\n</model>\n"]
         files[main_path] = "".join(sub)
-        comps = ['    <component p:path="/%s" objectid="%d" '
+        comps = ('    <component p:path="/%s" objectid="%d" '
                  'p:UUID="%08x-b206-40ff-9872-83e8017abed1" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
-                 % (escape(main_path), obj.sub_id, obj.sub_id)]
-        for k, extra in enumerate(obj.extra_volumes):
-            extra.sub_id = next_id
-            next_id += 1
-            extra_path = _file_name("%s_extra%d" % (obj.spec.name, k), n)
-            sub_paths.append(extra_path)
-            esub = [_model_head(), ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n <resources>\n',
-                    '  <object id="%d" p:UUID="%08x-8cb0-4c03-9d28-80fed5dfa1dc" type="model">\n' % (extra.sub_id, extra.sub_id),
-                    "   ", extra.mesh_text, "\n  </object>\n </resources>\n <build/>\n</model>\n"]
-            files[extra_path] = "".join(esub)
-            comps.append('    <component p:path="/%s" objectid="%d" '
-                         'p:UUID="%08x-b206-40ff-9872-83e8017abed1" transform="%s"/>\n'
-                         % (escape(extra_path), extra.sub_id, extra.sub_id, _transform_text(extra.transform)))
+                 % (escape(main_path), obj.sub_id, obj.sub_id))
         root.append('  <object id="%d" p:UUID="%08x-61cb-4c03-9d28-80fed5dfa1dc" type="model">\n'
-                    '   <components>\n%s   </components>\n  </object>\n' % (obj.id, obj.id, "".join(comps)))
+                    '   <components>\n%s   </components>\n  </object>\n' % (obj.id, obj.id, comps))
     root.append(' </resources>\n <build p:UUID="%s">\n' % BUILD_UUID)
     item = 0
     for obj in objects:
@@ -735,7 +409,7 @@ def write(spec, base, objects, out_path):
         ' <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n'
         ' <Default Extension="png" ContentType="image/png"/>\n'
         ' <Default Extension="gcode" ContentType="text/x.gcode"/>\n</Types>\n')
-    files[reload3mf.MODEL_SETTINGS] = _model_settings(spec, base, objects)
+    files[reload3mf.MODEL_SETTINGS] = _model_settings(spec, objects)
     files["Metadata/slice_info.config"] = (
         '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n  <header>\n'
         '    <header_item key="X-BBL-Client-Type" value="slicer"/>\n'
@@ -746,7 +420,6 @@ def write(spec, base, objects, out_path):
          for i in range(len(spec.plates))}, separators=(",", ":"))
     for name, data in base.files.items():
         files.setdefault(name, data)
-    _remap_positioned_files(files, remap_obj, plate_remap)
 
     out_dir = os.path.dirname(os.path.abspath(out_path))
     os.makedirs(out_dir, exist_ok=True)
@@ -760,20 +433,16 @@ def write(spec, base, objects, out_path):
                 z.writestr(name, data if isinstance(data, bytes) else data.encode("utf-8"))
         _check(tmp, objects)
         os.chmod(tmp, 0o644)
-        base.close()  # Windows cannot replace a file that is still open
         os.replace(tmp, out_path)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
 
 
-def _model_settings(spec, base, objects):
+def _model_settings(spec, objects):
     out = ['<?xml version="1.0" encoding="UTF-8"?>\n<config>\n']
     for obj in objects:
-        meta = obj.old.meta if obj.old else [("extruder", "1")]
-        part_meta = []
-        if obj.old and obj.old.part:
-            part_meta = [(k, v) for k, v in obj.old.part.meta.items() if k not in PART_KEYS]
+        meta = obj.spec.object_meta or [("extruder", "1")]
         out.append('  <object id="%d">\n' % obj.id)
         out.append(_meta_line("    ", "name", obj.spec.name))
         out += [_meta_line("    ", k, v) for k, v in meta]
@@ -785,19 +454,16 @@ def _model_settings(spec, base, objects):
         out.append(_meta_line("      ", "source_volume_id", "0"))
         for axis, value in zip("xyz", obj.offset):
             out.append(_meta_line("      ", "source_offset_" + axis, repr(float(value))))
-        out += [_meta_line("      ", k, v) for k, v in part_meta]
+        out += [_meta_line("      ", k, v) for k, v in obj.spec.part_meta]
         out.append('      <mesh_stat edges_fixed="0" degenerate_facets="0" facets_removed="0" '
                    'facets_reversed="0" backwards_edges="0"/>\n    </part>\n')
-        for extra in obj.extra_volumes:
-            out.append(re.sub(r'\bid="[^"]*"', 'id="%d"' % extra.sub_id, extra.raw_part, count=1) + "\n")
         out.append('  </object>\n')
     identify = 0
     for plate_no, plate in enumerate(spec.plates):
         out.append("  <plate>\n")
         out.append(_meta_line("    ", "plater_id", plate_no + 1))
         out.append(_meta_line("    ", "plater_name", plate.name))
-        kept = base.take_plate(plate.name, plate_no)
-        out += [_meta_line("    ", k, v) for k, v in kept]
+        out += [_meta_line("    ", k, v) for k, v in (plate.meta or [("locked", "false")])]
         for obj in objects:
             if obj.plate_no != plate_no:
                 continue
@@ -837,65 +503,63 @@ def _check(path, objects):
 def build(spec, stl_cache=None, dry_run=False):
     """Builds one project. Returns (report lines, written)."""
     created = not os.path.isfile(spec.path)
-    base = Base(spec.path, spec.template)
-    try:
-        objects, problems, bed = plan(spec, base, stl_cache)
-        if os.path.normcase(os.path.abspath(spec.out_path)) == os.path.normcase(os.path.abspath(spec.path)):
-            lines = ["%s (%s)" % (spec.shown(spec.path), "new" if created else "rebuilt")]
-        else:
-            lines = ["%s (new build of %s)" % (spec.shown(spec.out_path), spec.shown(spec.path))]
-        if base.settings_from:
-            source = "the project" if os.path.normcase(os.path.abspath(base.settings_from)) == \
-                os.path.normcase(os.path.abspath(spec.path)) else spec.shown(base.settings_from)
-            lines.append("  settings from %s, bed %g x %g mm" % (source, bed[2], bed[3]))
-        else:
-            problems.append("no printer settings: set Settings from to an Orca project made for your printer "
-                            "(Orca opens a project without them as bare parts, without plates)")
-        warnings = base.bed_warnings() + base.dropped
-        height = (base.settings() or {}).get("printable_height")
+    base = Base(spec.profiles, spec.template, spec.metadata, spec.profiles_from)
+    objects, problems, bed = plan(spec, base, stl_cache)
+    if os.path.normcase(os.path.abspath(spec.out_path)) == os.path.normcase(os.path.abspath(spec.path)):
+        lines = ["%s (%s)" % (spec.shown(spec.path), "new" if created else "rebuilt")]
+    else:
+        lines = ["%s (new build of %s)" % (spec.shown(spec.out_path), spec.shown(spec.path))]
+    if base.settings_from:
+        source = base.settings_from if spec.profiles else spec.shown(base.settings_from)
+        lines.append("  settings from %s, bed %g x %g mm" % (source, bed[2], bed[3]))
+    else:
+        problems.append("no printer settings: import an Orca 3MF, or set Settings from to an Orca project made "
+                        "for your printer (Orca opens a project without them as bare parts, without plates)")
+    warnings = base.bed_warnings()
+    height = (base.settings() or {}).get("printable_height")
+    if height is not None:
+        try:
+            height = float(height)
+        except (TypeError, ValueError):
+            warnings.append("the printer's printable_height cannot be read")
+            height = None
         if height is not None:
-            try:
-                height = float(height)
-            except (TypeError, ValueError):
-                warnings.append("the printer's printable_height cannot be read")
-                height = None
-            if height is not None:
-                for obj in objects:
-                    tall = obj.hi[2] - obj.lo[2]
-                    if tall > height + 1e-6:
-                        problems.append("%s: %.1f mm tall, above the printer's %.1f mm printable height"
-                                        % (obj.spec.name, tall, height))
-        for plate_no, plate in enumerate(spec.plates):
-            on = [o for o in objects if o.plate_no == plate_no]
-            copies = sum(len(o.transforms) for o in on)
-            lines.append("  plate %d %s: %d part%s, %d cop%s" % (plate_no + 1, plate.name or "", len(on),
-                                                                "" if len(on) == 1 else "s", copies,
-                                                                "y" if copies == 1 else "ies"))
-            for obj in on:
-                size = tuple(h - l for h, l in zip(obj.hi, obj.lo))
-                text = "    %s  %s  %.1f x %.1f x %.1f mm" % (obj.spec.name, os.path.basename(obj.spec.stl), *size)
-                if len(obj.transforms) > 1:
-                    text += "  x%d" % len(obj.transforms)
-                if obj.old is not None and any(k != "extruder" for k, _ in obj.old.meta):
-                    text += "  (kept its Orca settings)"
-                if obj.mark:
-                    text += "  (%s)" % obj.mark_note
-                if obj.notes:
-                    text += "  " + "; ".join(obj.notes)
-                lines.append(text)
-        lines += ["  problem: %s" % p for p in problems]
-        lines += ["  warning: %s" % w for w in warnings]
-        if problems:
-            lines.append("  not written")
-            return lines, False
-        if not objects:
-            lines.append("  no parts, not written")
-            return lines, False
-        if not dry_run:
-            write(spec, base, objects, spec.out_path)
-        return lines, not dry_run
-    finally:
-        base.close()
+            for obj in objects:
+                tall = obj.hi[2] - obj.lo[2]
+                if tall > height + 1e-6:
+                    problems.append("%s: %.1f mm tall, above the printer's %.1f mm printable height"
+                                    % (obj.spec.name, tall, height))
+    for plate_no, plate in enumerate(spec.plates):
+        on = [o for o in objects if o.plate_no == plate_no]
+        copies = sum(len(o.transforms) for o in on)
+        lines.append("  plate %d %s: %d part%s, %d cop%s" % (plate_no + 1, plate.name or "", len(on),
+                                                            "" if len(on) == 1 else "s", copies,
+                                                            "y" if copies == 1 else "ies"))
+        for obj in on:
+            size = tuple(h - l for h, l in zip(obj.hi, obj.lo))
+            text = "    %s  %s  %.1f x %.1f x %.1f mm" % (obj.spec.name, os.path.basename(obj.spec.stl), *size)
+            if len(obj.transforms) > 1:
+                text += "  x%d" % len(obj.transforms)
+            placed = sum(1 for s in obj.spec.spots if s is not None)
+            if placed < len(obj.transforms):
+                text += "  (%d placed)" % (len(obj.transforms) - placed)
+            if obj.spec.object_meta and any(k != "extruder" for k, _ in obj.spec.object_meta) \
+                    or obj.spec.part_meta:
+                text += "  (own Orca settings)"
+            if obj.notes:
+                text += "  " + "; ".join(obj.notes)
+            lines.append(text)
+    lines += ["  problem: %s" % p for p in problems]
+    lines += ["  warning: %s" % w for w in warnings]
+    if problems:
+        lines.append("  not written")
+        return lines, False
+    if not objects:
+        lines.append("  no parts, not written")
+        return lines, False
+    if not dry_run:
+        write(spec, base, objects, spec.out_path)
+    return lines, not dry_run
 
 
 # --------------------------------------------------------------------------
@@ -903,7 +567,8 @@ def build(spec, stl_cache=None, dry_run=False):
 
 
 class ImportedPart:
-    def __init__(self, name, source, up, angle, copies, stl=None, note="", mirror=False):
+    def __init__(self, name, source, up, angle, copies, stl=None, note="", mirror=False, spots=None,
+                 object_meta=(), part_meta=()):
         self.name = name
         self.source = source  # source_file as stored in the project
         self.stl = stl  # the STL found for it, or None
@@ -912,70 +577,172 @@ class ImportedPart:
         self.copies = copies
         self.note = note
         self.mirror = mirror
+        self.spots = spots or []  # (x, y, turn) of each copy, see PartSpec; empty when not known
+        self.object_meta = list(object_meta)
+        self.part_meta = list(part_meta)
+
+
+class ImportedPlate:
+    def __init__(self, name, meta, parts):
+        self.name = name
+        self.meta = list(meta)  # the plate's own Orca settings
+        self.parts = parts
+
+
+class ImportedProject:
+    """What Import keeps of an Orca 3MF: its plates and parts with their Orca settings and where each copy stands,
+    the printer, process and filament settings, and what it could not keep."""
+
+    def __init__(self):
+        self.plates = []
+        self.profiles = {}
+        self.metadata = {}
+        self.dropped = []  # lines about what is not kept (meshes of modifiers, layer heights, ...)
 
 
 def read_layout(path, finder, stl_cache=None, plate_paths=False, top=None, known=None):
-    """Plates of an existing project: [(plate name, [ImportedPart])], and problem lines.
+    """[(plate name, [ImportedPart])] of an Orca 3MF, and problem lines (read_project, without the settings)."""
+    imported, problems = read_project(path, finder, plate_paths=plate_paths, top=top, known=known)
+    return [(p.name, p.parts) for p in imported.plates], problems
+
+
+def _unit_rows(rows):
+    """The rotation of rows with any scale taken out (each column made unit length)."""
+    cols = [[rows[r][c] for r in range(3)] for c in range(3)]
+    cols = [[v / (math.sqrt(sum(x * x for x in col)) or 1.0) for v in col] for col in cols]
+    return tuple(tuple(cols[c][r] for c in range(3)) for r in range(3))
+
+
+def _strip_mirror(rows):
+    return tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
+
+
+def read_project(path, finder, plate_paths=False, top=None, known=None, bed=(256.0, 256.0)):
+    """Reads an Orca 3MF into an ImportedProject, and problem lines.
 
     finder: reload3mf.SourceFinder for the STLs. A file name found in several folders (a part exported with
     several tolerances) is taken from the folder the plate is named after when plate_paths is on (_find_source);
     plate_paths off: plate names are only names. top: the project's STL folder, where looking up stops.
-    known(plate name, file name): the STL the tab already links, or None (a re-import)."""
-    stl_cache = {} if stl_cache is None else stl_cache
+    known(plate name, file name): the STL the tab already links, or None (a re-import). bed: the bed size used
+    when the 3MF has no printer settings.
+
+    Each copy (build item) belongs to the plate it stands on; its spot is the centre of its footprint from that
+    plate's front left corner, and its turn is around the vertical, on top of the first copy's."""
     project = reload3mf.Project(path)
     problems = []
+    out = ImportedProject()
     try:
-        root = ET.fromstring(project.zip.read(reload3mf.MODEL_SETTINGS))
+        z = project.zip
+        out.profiles, out.metadata = read_profiles(z)
+        names = set(z.namelist())
+        if any(n in names for n in INDEX_OBJECT_FILES):
+            out.dropped.append("variable layer heights, height ranges and brim ears are not kept (they belong to "
+                               "the old meshes)")
+        if CUSTOM_GCODE_FILE in names:
+            out.dropped.append("custom G-code per layer (pauses, colour changes) is not kept")
+        base = Base(out.profiles, profiles_from=path)
+        x0, y0, width, depth = base.bed(bed)
+        root = ET.fromstring(z.read(reload3mf.MODEL_SETTINGS))
+        object_meta = {o.get("id"): [(m.get("key"), m.get("value")) for m in o.findall("metadata")
+                                     if m.get("key") and m.get("key") != "name"]
+                       for o in root.findall("object")}
         project_dir = os.path.dirname(os.path.abspath(path))
         plates = []
         for plate in root.findall("plate"):
-            meta = {m.get("key"): m.get("value") for m in plate.findall("metadata")}
+            meta = [(m.get("key"), m.get("value")) for m in plate.findall("metadata") if m.get("key")]
+            pmeta = dict(meta)
             ids = [{m.get("key"): m.get("value") for m in inst.findall("metadata")}.get("object_id")
                    for inst in plate.findall("model_instance")]
-            plates.append((int(meta.get("plater_id") or len(plates) + 1), meta.get("plater_name") or "", ids))
+            plates.append((int(pmeta.get("plater_id") or len(plates) + 1), pmeta.get("plater_name") or "",
+                           [(k, v) for k, v in meta if k not in PLATE_KEYS], ids))
         plates.sort(key=lambda p: p[0])
+        count = len(plates)
+        grid = (int(width), int(depth))
+        corners = [layout.plate_origin(i, count, grid) for i in range(count)]
+        corners = [(ox + x0, oy + y0) for ox, oy in corners]
         listed_on = {}  # object id -> how many plates list it
-        for _, _, ids in plates:
+        for _, _, _, ids in plates:
             for oid in set(ids):
                 listed_on[oid] = listed_on.get(oid, 0) + 1
-        out = []
         folders = {}  # the folders below the STL root, read once
-        for _, name, ids in plates:
+        for plate_no, (_, name, plate_meta, ids) in enumerate(plates):
             parts, seen = [], {}
             for oid in ids:
                 if oid in seen:
-                    seen[oid].listed += 1
-                    seen[oid].copies = max(seen[oid].copies, seen[oid].listed)
                     continue
                 obj = project.objects.get(oid)
                 if obj is None:
                     continue
                 models = [p for p in obj.parts if p.is_model_part]
-                if len(obj.parts) != 1 or len(models) != 1:
-                    problems.append("%s: has %d parts, only objects of one STL are taken" % (obj.name, len(obj.parts)))
+                if len(models) != 1:
+                    problems.append("%s: has %d parts, only objects of one STL are taken" % (obj.name, len(models)))
                     continue
                 part = models[0]
-                transform = project.items[obj.items[0]][1] if obj.items else None
-                rows, _ = reload3mf.compose(reload3mf.parse_transform(transform),
-                                            reload3mf.parse_transform(part.transform))
-                mirror = layout.det(rows) < 0.0
+                if len(obj.parts) > 1:
+                    out.dropped.append("%s: %d modifier%s not kept" % (obj.name, len(obj.parts) - 1,
+                                                                      "" if len(obj.parts) == 2 else "s"))
+                inner = reload3mf.parse_transform(part.transform)
+                try:
+                    mesh = project.old_mesh(part)
+                except ReloadError:
+                    mesh = None
+                # Each copy, with the plate it stands on (the nearest plate centre)
+                copies_here = []
+                for item_index in obj.items:
+                    rows, t = reload3mf.compose(reload3mf.parse_transform(project.items[item_index][1]), inner)
+                    if mesh is not None:
+                        lo, hi = layout.footprint(mesh.verts, rows)
+                        cx, cy = t[0] + (lo[0] + hi[0]) / 2.0, t[1] + (lo[1] + hi[1]) / 2.0
+                        on = min(range(count), key=lambda i: (corners[i][0] + width / 2.0 - cx) ** 2 +
+                                 (corners[i][1] + depth / 2.0 - cy) ** 2)
+                    else:
+                        cx = cy = None
+                        on = plate_no if listed_on.get(oid) == 1 else -1
+                    if on == plate_no:
+                        copies_here.append((rows, cx, cy))
+                if not copies_here and obj.items:
+                    # Not standing on the plate that lists it: built from scratch there
+                    first = project.items[obj.items[0]][1]
+                    copies_here = [(reload3mf.compose(reload3mf.parse_transform(first), inner)[0], None, None)]
+                if not copies_here:
+                    copies_here = [(reload3mf.compose(reload3mf.parse_transform(None), inner)[0], None, None)]
+                ref = _unit_rows(copies_here[0][0])
+                mirror = layout.det(ref) < 0.0
                 if mirror:
                     # Factor out the reflection as a mirror across the part's own X axis (M = R * diag(-1, 1, 1)),
                     # so the ImportedPart keeps the unmirrored up/turn and the mirror flag puts it back on Build.
-                    rows = tuple(tuple(-c if k == 0 else c for k, c in enumerate(row)) for row in rows)
-                up, angle = layout.orientation_from_matrix(rows)
+                    ref = _strip_mirror(ref)
+                up, angle = layout.orientation_from_matrix(ref)
                 up = tuple(0.0 if abs(c) < 1e-9 else c for c in up)
+                angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
+                spots, tipped = [], 0
+                for rows, cx, cy in copies_here:
+                    if cx is None:
+                        spots.append(None)
+                        continue
+                    rows = _unit_rows(rows)
+                    if mirror:
+                        rows = _strip_mirror(rows)
+                    turn_rows = layout.matmul(rows, layout.transpose(ref))
+                    if abs(turn_rows[2][2] - 1.0) > 1e-3:
+                        tipped += 1
+                        turn = 0.0
+                    else:
+                        turn = math.radians(round(math.degrees(math.atan2(turn_rows[1][0], turn_rows[0][0])), 4))
+                    spots.append((round(cx - corners[plate_no][0], 4), round(cy - corners[plate_no][1], 4), turn))
+                if all(s is None for s in spots):
+                    spots = []
                 stl, note = _find_source(part, finder, project_dir, name if plate_paths else "", folders, top,
                                          (lambda f, n=name: known(n, f)) if known else None)
-                angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
-                # Orca may list only an object's first copy on its plate: an object on one plate has every build
-                # item (copy) of it there
-                copies = len(obj.items) if listed_on.get(oid) == 1 and obj.items else 1
-                imported = ImportedPart(obj.name, part.source, up, angle, copies, stl, note, mirror=mirror)
-                imported.listed = 1  # copies the plate lists; more are counted below
+                if tipped:
+                    out.dropped.append("%s: %d cop%s tipped another way than the first, built standing like it"
+                                       % (obj.name, tipped, "y" if tipped == 1 else "ies"))
+                imported = ImportedPart(obj.name, part.source, up, angle, len(copies_here), stl, note,
+                                        mirror=mirror, spots=spots, object_meta=object_meta.get(oid, ()),
+                                        part_meta=[(k, v) for k, v in part.meta.items() if k not in PART_KEYS])
                 seen[oid] = imported
                 parts.append(imported)
-            out.append((name, parts))
+            out.plates.append(ImportedPlate(name, plate_meta, parts))
         return out, problems
     finally:
         project.close()

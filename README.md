@@ -10,7 +10,7 @@
 
 # Orca 3MF
 
-An **Orca** tab in the 3D Viewport sidebar that builds OrcaSlicer projects (`.3mf`) from the STLs Combi Export writes. You set up each project once in Blender: its plates, the parts on each plate, how each part stands on the plate, and the seam drawn on it. **Build** then writes the project, so a new export is one click away from a ready Orca project, seams included.
+An **Orca3mf** tab in the 3D Viewport sidebar that builds OrcaSlicer projects (`.3mf`) from the STLs Combi Export writes. You set up each project once in Blender: its plates, the parts on each plate, how each part stands on the plate, and the seam drawn on it. **Build** then writes the project, so a new export is one click away from a ready Orca project, seams included.
 
 The setup is saved in the .blend file. The tab is laid out like Combi Export: the roots on top, then a list per level with its buttons on the right.
 
@@ -20,9 +20,9 @@ The setup is saved in the .blend file. The tab is laid out like Combi Export: th
 | --- | --- |
 | Orca Projects | **STL root**: where the parts' paths start. Empty: Combi Export's root. **3MF root**: where the projects are saved, `../orca_slicer` by default. Next to it, **Import** (make a project from an Orca file) and **Build** (every ticked project). **Seams**: the width of the painted seam strip and how far a seam line may be from the surface. |
 | Info | The log of the last build or import, and a short guide. |
-| Projects | One row per 3MF file: its Build button, tick, name and folder. Below the list, the active project's STL folder and **Settings from**. |
+| Projects | One row per 3MF file: its Build button, tick, name and folder. Below the list, the active project's STL folder, **Settings from**, **Update from 3MF**, **Plate names are folders** and **Overwrite the 3MF**. |
 | Plates | One row per Orca plate: tick, number, name, **gap** and STL folder. |
-| Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Copies**, **Mirror** and **Seam**. |
+| Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Mirror**, **Seam** and **Copies** (open it for each copy's X, Y and Turn). |
 
 The roots can be absolute (`D:\Grip\stl`, `/home/olex/Grip/stl`) or relative to the .blend file's folder: `../stl` and Blender's `//../stl` are the same folder. Folders can be written with `/` or `\` on Windows and Linux alike, so a .blend set up on one works on the other. The folder button next to STL root, 3MF root and **Settings from** saves the picked folder or file in that relative form (`../stl`); it stays absolute while the .blend is not saved, or when it is on another drive.
 
@@ -34,10 +34,10 @@ The **+** of the Parts list opens a file browser: pick one or more STLs, each be
 
 - **Up**: the part's direction, in Blender as exported, that points up on the plate. `0, 0, 1` prints it as it stands in Blender, `0, 0, -1` upside down, `0, 1, 0` on its front face (Blender's front is −Y).
 - **Turn**: then turns it around that axis.
-- **Copies**: how many of it go on the plate.
+- **Copies**: each copy has its own spot, X and Y (the centre of its footprint, from the plate's front left corner) and its own Turn on top of the part's. **+** adds a copy, **−** removes the selected one, and the round arrow lets the next Build nest all of them again.
 - **Mirror**: mirror the part across its own X axis (a part mirrored in Orca imports with this ticked, and builds back mirrored).
 
-Each plate is nested on its own: parts are stood up, set on the bed, and placed by their footprint, largest first, **gap** apart and half a gap from the edges, as a compact block in the middle of the plate. A part that does not fit stops the build and the log says which. The plates are laid out the way Orca lays them out, so each part lands on its plate.
+A copy with a spot stands there. A copy without one (a new part, a new copy, or one sent back to nesting) is nested in the free space around them: stood up, set on the bed and placed by its footprint, largest first, **gap** apart and half a gap from the edges (a compact block in the middle of an empty plate). Build then records where it went, so every copy keeps its spot from then on. A part that does not fit stops the build and the log says which. The plates are laid out the way Orca lays them out, so each part lands on its plate.
 
 ## Seams
 
@@ -56,22 +56,22 @@ The line is snapped onto the part's surface within **Snap**, so one line serves 
 
 A **new** project takes its printer, process and filament settings from **Settings from**: any Orca project made for your printer. A project added to the list starts with the Settings from of the selected project, or that project's own file. Orca opens a project without settings as bare parts, without its plates, so Build refuses to write one.
 
-An **existing** project is never changed unless **Overwrite the 3MF** is ticked in the project box (it asks first). Without it, each Build writes the next numbered file into a `3mf_builds` folder next to the project (`GripV_parts_001.3mf`, `_002`, ...); old ones are left for you to delete. A new project (no file yet) is written as the project itself. Either way the build keeps, from the project:
+An **existing** project is never changed unless **Overwrite the 3MF** is ticked in the project box (it asks first). Without it, each Build writes the next numbered file into a `3mf_builds` folder next to the project (`GripV_parts_001.3mf`, `_002`, ...); old ones are left for you to delete. A new project (no file yet) is written as the project itself.
 
-- its printer, process and filament settings, and the files Orca keeps with them
-- each part's own settings (for example wall loops or infill set on a part in Orca), only on an exact match: an object on the same plate (by name; an unnamed plate by its position) with the same STL file name and the same object name. Several such objects count only when their settings are the same (an object split with "Set as individual object"). Never by shape or order, never from another plate. A part that gets Orca's defaults is marked: yellow when it is new, red when the build was not sure (it says why)
-- objects added in Orca that the tab doesn't have: kept as they are on their plate, nested with the rest (the report says "kept from the 3MF"). An object the tab put there before and no longer has is dropped
-- each plate's settings, by name (for example its bed type)
-- the painting of a part whose shape did not change (supports, colours, and its seams when it has no Seam line)
-- modifiers, negative parts and support blockers made in Orca (their meshes and settings, re-anchored to the part)
-- variable layer heights, height range modifiers and brim ears (`layer_heights_profile.txt`, `layer_config_ranges.xml`, `brim_ear_points.txt`), re-keyed to the part's new position
-- per-layer custom G-code (`custom_gcode_per_layer.xml`), re-keyed to the plate's new position
+Build never reads the old 3MF: everything comes from the .blend. Import saved there:
 
-Each part's place on the plate is set again by the nesting, unless the plate's pin (**Keep positions**, in the Plates list) is on: then every part found in the 3MF by the exact match above keeps where it stood, with its copies (moved by hand in Orca, or a plate that moved in the grid), and only new parts and new copies are nested around them. Imported plates start with the pin on. A part whose shape or Up changed keeps the centre of its spot. Objects made of several STLs are not built, and what Build does not keep yet is listed under Not done yet.
+- the printer, process and filament settings (used instead of **Settings from**)
+- each plate's own settings (for example its bed type)
+- each part's own settings (for example wall loops or infill set on a part in Orca)
+- where each copy stands, and its turn
+
+The meshes come fresh from the STLs and the seams from the Seam lines, so what belongs to Orca's old meshes is not kept: painting, modifiers, negative parts and support blockers, variable layer heights, height ranges, brim ears and per-layer custom G-code. Import lists what it left out. Objects made of several STLs are not built.
+
+To take changes made in Orca back (moved copies, new settings), use **Update from 3MF** in the project box: it opens at the newest build, and reads that file into the project like a re-import (links, seams and Build ticks are kept; the project's own 3MF stays the same).
 
 ## Import
 
-**Import** makes a project from an existing Orca project: its plates, and each part with its STL, Up, Turn and copies. Importing a 3MF that is already a project in the tab updates that project instead, and keeps its links, Build ticks and seams. Import never takes a file by its name alone, since every tolerance version of a part has the same file name. For each part, in order:
+**Import** makes a project from an existing Orca project: its plates, and each part with its STL, Up, Turn, each copy's spot and the Orca settings listed under Build. Importing a 3MF that is already a project in the tab updates that project instead, and keeps its links, Build ticks and seams. Import never takes a file by its name alone, since every tolerance version of a part has the same file name. For each part, in order:
 
 1. the path Orca stored, when the file is there;
 2. on a re-import, the tab's own link for that file name on that plate, when it is the only one;
@@ -82,7 +82,7 @@ With **Plate names are folders** on, a plate's name *is* its folder: the plate's
 
 Anything else comes in red with the reason. **Relink missing parts** (under the parts list) fixes the whole plate at once: pick a folder, each missing part is looked for in that folder only; with Plate names are folders ticked also in the folders above it, and the plate is named after the folder so the next import finds its parts by itself. Each part also has its own folder button. Import's **STL folder** field sets the project's STL folder where looking up stops; empty, it is the folder all found parts share.
 
-The parts list marks each part: red when its STL is missing or nothing sure was found, yellow when it works but needs a look (a new part with Orca's defaults, or, with Plate names are folders, an STL outside the plate's folder and the folders above it, which Import could not find again from its name). The part's box says why.
+The parts list marks each part: red when its STL is missing or nothing sure was found, yellow when it works but needs a look (with Plate names are folders, an STL outside the plate's folder and the folders above it, which Import could not find again from its name). The part's box says why.
 
 ## How it works
 

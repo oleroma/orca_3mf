@@ -277,7 +277,6 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual((imported.name, imported.folder, imported.stl_folder), ("GripV_parts.3mf", "GripV",
                                                                                "GripV/parts"))
         self.assertFalse(imported.overwrite)
-        self.assertTrue(all(p.keep for p in imported.plates))  # placed in Orca: kept where they are
         imported.overwrite = True
         self.assertEqual(len(imported.plates), 2)
         part = imported.plates[1].parts[0]
@@ -285,8 +284,59 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual(tuple(round(c, 6) for c in part.up), (1, 0, 0))
         self.assertAlmostEqual(part.angle, math.radians(90), places=6)
         self.assertEqual(len(imported.plates[0].parts), 0)
+        self.assertEqual([c.placed for c in part.instances], [True, True])  # each copy keeps its spot
+        self.assertIn("project_settings.config", imported.profiles)
+        before = self.items()
         report = self.build(settings.project_index)
         self.assertIn("(rebuilt)", report)
+        self.assertEqual(self.items(), before)  # nothing moved
+        # Everything Build needs is in the .blend: the 3MF can go
+        os.remove(self.out())
+        imported.template = ""
+        report = self.build(settings.project_index)
+        self.assertIn("settings from the import of", report)
+        self.assertEqual(self.items(), before)
+        # A new copy is nested in free space by the next Build, which records its spot
+        part.copies = 3
+        self.assertFalse(part.instances[2].placed)
+        self.build(settings.project_index)
+        self.assertTrue(part.instances[2].placed)
+        self.assertEqual(self.items()[:2], before)
+
+    def items(self):
+        """The transforms of the build items, in order."""
+        with zipfile.ZipFile(self.out()) as z:
+            return re.findall(r'<item [^>]*transform="([^"]*)"', z.read("3D/3dmodel.model").decode())
+
+    def test_update_from_3mf_takes_the_newest_build_back(self):
+        settings = bpy.context.scene.orca_reload
+        project = self.add_project()
+        self.add_part(copies=2)
+        self.build()
+        project.overwrite = False
+        self.build()  # 3mf_builds/GripV_parts_001.3mf
+        build = os.path.join(os.path.dirname(self.out()), "3mf_builds", "GripV_parts_001.3mf")
+        # Moved in Orca: every item 5 mm to the right
+        with zipfile.ZipFile(build) as z:
+            entries = {n: z.read(n) for n in z.namelist()}
+
+        def shift(m):
+            v = m.group(2).split()
+            v[9] = repr(float(v[9]) + 5.0)
+            return m.group(1) + " ".join(v) + '"'
+        entries["3D/3dmodel.model"] = re.sub(r'(<item [^>]*transform=")([^"]*)"', shift,
+                                             entries["3D/3dmodel.model"].decode()).encode()
+        with zipfile.ZipFile(build, "w") as z:
+            for n, data in entries.items():
+                z.writestr(n, data)
+        part = project.plates[0].parts[0]
+        xs = [c.x for c in part.instances]
+        self.assertEqual(bpy.ops.orca_reload.update_from_3mf(filepath=build), {'FINISHED'})
+        self.assertEqual(len(settings.projects), 1)
+        self.assertEqual(project.name, "GripV_parts")  # still the project's own 3MF
+        part = project.plates[0].parts[0]
+        for old, new in zip(xs, [c.x for c in part.instances]):
+            self.assertAlmostEqual(new, old + 5.0, places=3)
 
     def test_relink_finds_missing_parts_from_a_folder_and_names_the_plate(self):
         from bl_ext.orca_test.orca_3mf import operators
@@ -361,12 +411,10 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual(len(settings.projects), 1)  # the same project, imported again
         plate = settings.projects[0].plates[0]
         self.assertEqual([p.path for p in plate.parts], ["box.stl"])  # its link kept; lid was not built
-        # A part new to the plate gets Orca's defaults: marked yellow by the build
         self.add_part(path="lid.stl")  # the imported plate's folder is GripV/parts
         self.build()
-        self.assertEqual([p.mark for p in plate.parts], ['NONE', 'WARNING'])
-        self.assertIn("new part", plate.parts[1].mark_note)
-        # Taken off the tab: dropped from the 3MF (an object added in Orca would be kept)
+        self.assertEqual(sorted(os.path.basename(p) for p in self.source_files()), ["box.stl", "lid.stl"])
+        # Taken off the tab: gone from the 3MF
         plate.parts.remove(1)
         self.build()
         self.assertEqual([os.path.basename(p) for p in self.source_files()], ["box.stl"])

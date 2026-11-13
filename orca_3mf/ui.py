@@ -112,7 +112,6 @@ class ORCA_UL_plates(bpy.types.UIList):
         else:
             row.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
-        tools.prop(item, "keep", text="", icon='PINNED' if item.keep else 'UNPINNED', emboss=False)
         tools.label(text="", icon=ICONS['GAP'])
         tools.prop(item, "gap", text="", emboss=False)
         if not project.plate_paths:
@@ -141,6 +140,18 @@ class ORCA_UL_parts(bpy.types.UIList):
         path.prop(item, "path", text="", emboss=False, icon='ERROR' if level != 'NONE' else ICONS['STL'])
 
 
+class ORCA_UL_copies(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.label(text="%d" % (index + 1))
+        if not item.placed:
+            row.label(text="placed by the next Build", icon=ICONS['BLANK'])
+            return
+        row.prop(item, "x", text="X", emboss=False)
+        row.prop(item, "y", text="Y", emboss=False)
+        row.prop(item, "turn", text="Turn", emboss=False)
+
+
 class ORCA_UL_log(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         layout.label(text=item.text, icon=item.icon or ICONS['BLANK'])
@@ -149,7 +160,7 @@ class ORCA_UL_log(bpy.types.UIList):
 class _OrcaPanel:
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = "Orca"
+    bl_category = "Orca3mf"
 
 
 class VIEW3D_PT_orca_reload(_OrcaPanel, bpy.types.Panel):
@@ -238,16 +249,17 @@ GUIDE = (
     )),
     ("Placing:", 'UPAXIS', (
         "Up: the part's direction (in Blender) that points up on the plate; 0, 0, -1 flips it",
-        "Turn: then turns it around that axis; Copies puts more of it on the plate",
-        "Parts are nested by their footprint, largest first, Gap apart, centred on the plate",
+        "Turn: then turns it around that axis",
+        "Copies: each copy keeps its spot (X, Y, Turn), read on Import and recorded by Build",
+        "A new copy or part is nested in free space, Gap apart, then keeps that spot",
     )),
     ("Building:", 'BUILD', (
         "Build (row button) writes that project, the Build button by the 3MF root all ticked ones",
         "While it builds, a progress bar ends the row; its Build button turns into Cancel",
-        "A new project takes the printer, process and filament settings from Settings from",
-        "An existing project keeps its settings, each part's settings (by name) and each plate's",
-        "A part whose shape did not change keeps its painting from Orca",
-        "Import: makes a project from an Orca 3MF, so Build updates that file",
+        "Import saves the printer, plate and part settings in the .blend: the 3MF is not read again",
+        "Update from 3MF: takes changes made in Orca back (start: the newest build)",
+        "Without an import, the settings come from Settings from",
+        "Meshes come from the STLs: Orca's painting, modifiers and layer heights are not kept",
     )),
     ("Seams:", 'SEAM', (
         "Pick a curve or mesh in a part's Seam field, drawn on the part's surface",
@@ -287,12 +299,14 @@ class VIEW3D_PT_orca_reload_projects(_OrcaPanel, bpy.types.Panel):
         row = draw_label_row(box, "Settings from:")
         exists = os.path.isfile(props.project_path(scene, project))
         sub = row.row(align=True)
-        sub.active = not exists
-        sub.alert = not exists and not project.template
         sub.prop(project, "template", text="")
         sub.operator("orca_reload.browse_template", text="", icon=ICONS['DIR'])
-        if exists:
-            draw_label_row(box, "").label(text="The project exists: its own settings are kept")
+        sub.active = not project.profiles
+        sub.alert = not project.profiles and not project.template
+        if project.profiles:
+            draw_label_row(box, "").label(text="Saved from " + (project.profiles_from or "the import"))
+        row = draw_label_row(box, "")
+        row.operator("orca_reload.update_from_3mf", icon=ICONS['IMPORT'])
         row = draw_label_row(box, "")
         row.prop(project, "plate_paths")
         row = draw_label_row(box, "")
@@ -374,14 +388,28 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         row.prop(part, "up", text="")
         row = draw_label_row(box, "Turn:")
         row.prop(part, "angle", text="")
-        row.prop(part, "copies")
         row = draw_label_row(box, "Mirror:")
         row.prop(part, "mirror", text="")
         row = draw_label_row(box, "Seam:")
         row.prop(part, "seam", text="")
 
+        wm = context.window_manager
+        header = box.row(align=True)
+        header.prop(wm, "orca_reload_copies", text="", emboss=False,
+                    icon=ICONS['OPEN'] if wm.orca_reload_copies else ICONS['RIGHT'])
+        header.prop(part, "copies", text="Copies")
+        header.operator("orca_reload.copy_action", text="", icon=ICONS['ADD']).action = 'ADD'
+        header.operator("orca_reload.copy_action", text="", icon='REMOVE').action = 'REMOVE'
+        header.operator("orca_reload.copy_action", text="", icon='FILE_REFRESH').action = 'NEST'
+        if wm.orca_reload_copies:
+            if not len(part.instances):
+                box.label(text="Placed by the next Build")
+            else:
+                box.template_list("ORCA_UL_copies", "", part, "instances", part, "instance_index",
+                                  rows=min(max(len(part.instances), 2), 8))
+
 
 # Panels show in registration order
-classes = (ORCA_UL_projects, ORCA_UL_plates, ORCA_UL_parts, ORCA_UL_log, VIEW3D_PT_orca_reload,
+classes = (ORCA_UL_projects, ORCA_UL_plates, ORCA_UL_parts, ORCA_UL_copies, ORCA_UL_log, VIEW3D_PT_orca_reload,
            VIEW3D_PT_orca_reload_info, VIEW3D_PT_orca_reload_projects, VIEW3D_PT_orca_reload_plates,
            VIEW3D_PT_orca_reload_parts)
