@@ -19,6 +19,7 @@ ICONS = {
 
 # Width of the copies column in the parts list (room for "x999"), in UI units
 COPIES_UNITS = 1.8
+PART_NAME_SPLIT = 0.3  # share of the row the part name gets; the rest is copies + path
 # Rows of a list: tall enough for its six buttons (the list scrolls beyond)
 LIST_ROWS = 6
 # Width of the labels before the root folder fields, in UI units
@@ -124,7 +125,7 @@ class ORCA_UL_parts(bpy.types.UIList):
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = data
-        split = layout.split(factor=0.45)
+        split = layout.split(factor=PART_NAME_SPLIT)
         row = split.row(align=True)
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.prop(item, "name", text="", emboss=False)
