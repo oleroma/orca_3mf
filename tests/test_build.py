@@ -237,14 +237,15 @@ class BuildTest(unittest.TestCase):
         for path in stl.values():
             text = text.replace('value="%s"' % path, 'value="%s"' % os.path.basename(path))
         self.replace_entry(reload3mf.MODEL_SETTINGS, text)
-        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]), plate_paths=True)
+        plates, problems = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]), plate_paths=True,
+                                                top=os.path.join(self.dir, "buttons"))
         got = {name: {p.name: p.stl for p in parts} for name, parts in plates}
         self.assertEqual(got["tight/cap_loose"], {"button.stl": stl["tight"], "dpad.stl": stl["tight", "cap_loose"]})
         self.assertEqual(got["loose/cap_tight"], {"button.stl": stl["loose"], "dpad.stl": stl["loose", "cap_tight"]})
         # A plate not named after a folder: nothing is guessed, and the note says how to fix it
         self.assertEqual(got["Plate 3"], {"button.stl": None, "dpad.stl": None})
         note = next(p.note for name, parts in plates if name == "Plate 3" for p in parts)
-        self.assertIn("no folder is named like the plate", note)
+        self.assertIn("there is no folder Plate 3", note)
 
     def names_only(self, plates):
         """Builds the plates, then leaves Orca's way of storing only the file names."""
@@ -258,7 +259,7 @@ class BuildTest(unittest.TestCase):
     def test_plate_folders_take_only_what_is_sure(self):
         root = os.path.join(self.dir, "stl")
         dpad = self.write("dpad", (12, 8, 3), (0, 0, 1.5), "stl/buttons/tight/cap_loose")
-        self.write("dpad", (12, 8, 3), (0, 0, 1.5), "stl/dpads/tight/cap_loose")  # a second tight/cap_loose
+        self.write("dpad", (12, 8, 3), (0, 0, 1.5), "stl/dpads/tight/cap_loose")  # another tight/cap_loose
         self.write("knob", (5, 5, 5), (0, 0, 2.5), "stl/buttons/tight")
         knob = self.write("knob", (5, 5, 5), (0, 0, 2.5), "stl/buttons/tight/cap_loose")  # knob.stl at 2 levels
         stray = self.write("lid", (5, 5, 5), (0, 0, 2.5), "stl")  # an old copy above the project's folder
@@ -266,20 +267,17 @@ class BuildTest(unittest.TestCase):
                                                                    build3mf.PartSpec("knob.stl", knob),
                                                                    build3mf.PartSpec("lid.stl", stray)])])
         finder = reload3mf.SourceFinder([root])
-        # Two folders end in tight/cap_loose: nothing is taken, and a longer name is offered
-        plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True)
-        notes = {p.name: (p.stl, p.note) for p in plates[0][1]}
-        self.assertIsNone(notes["dpad.stl"][0])
-        self.assertIn("matches 2 folders", notes["dpad.stl"][1])
-        self.assertIn("buttons/tight/cap_loose", notes["dpad.stl"][1])
-        # Below the project's folder (stl/buttons) the name is unique; knob.stl is in two of its folders
+        # The plate name is a path below the project's folder (stl/buttons), never "a folder ending in it"
         plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True, top=os.path.join(root, "buttons"))
         notes = {p.name: (p.stl, p.note) for p in plates[0][1]}
         self.assertEqual(notes["dpad.stl"][0], dpad)
-        self.assertIsNone(notes["knob.stl"][0])
+        self.assertIsNone(notes["knob.stl"][0])  # in two of the plate's folders
         self.assertIn("in 2 of the plate's folders", notes["knob.stl"][1])
-        # The old lid.stl lies above the project's folder: never looked at
-        self.assertIsNone(notes["lid.stl"][0])
+        self.assertIsNone(notes["lid.stl"][0])  # above the project's folder: never looked at
+        # Below the STL root itself there is no folder tight/cap_loose: nothing is taken
+        plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True)
+        self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])
+        self.assertIn("there is no folder tight/cap_loose", plates[0][1][0].note)
         # Without the switch, plate names are only names
         plates, _ = build3mf.read_layout(self.out, finder, top=os.path.join(root, "buttons"))
         self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])

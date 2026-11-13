@@ -101,13 +101,20 @@ class ORCA_UL_plates(bpy.types.UIList):
         row = split.row(align=True)
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.label(text="%d" % (index + 1))
-        row.prop(item, "name", text="", emboss=False)
+        project = data
+        if project.plate_paths:  # the name is the plate's folder
+            name = row.row(align=True)
+            name.alert = not os.path.isdir(props.plate_folder(context.scene, project, item))
+            name.prop(item, "name", text="", emboss=False, icon='ERROR' if name.alert else ICONS['DIR'])
+        else:
+            row.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
         tools.prop(item, "keep", text="", icon='PINNED' if item.keep else 'UNPINNED', emboss=False)
         tools.label(text="", icon=ICONS['GAP'])
         tools.prop(item, "gap", text="", emboss=False)
-        tools.separator(factor=0.5)
-        tools.prop(item, "stl_folder", text="", emboss=False, icon=ICONS['DIR'])
+        if not project.plate_paths:
+            tools.separator(factor=0.5)
+            tools.prop(item, "stl_folder", text="", emboss=False, icon=ICONS['DIR'])
 
 
 class ORCA_UL_parts(bpy.types.UIList):

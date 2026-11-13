@@ -288,9 +288,8 @@ class ORCA_OT_relink(bpy.types.Operator):
             if hit:
                 part.path = props.part_relative(scene, project, plate, hit)
                 found += 1
-        if project.plate_paths:
-            plate.name = build3mf.plate_name_for(folder, [props.stl_root(scene)])
-            _set_plate_folder(scene, project, plate, folder)
+        if project.plate_paths:  # the plate's name is now the picked folder
+            props.move_plate(scene, project, plate, folder=folder)
         left = len(missing) - found
         self.report({'WARNING'} if left else {'INFO'},
                     "Plate %s: %d of %d missing parts found%s" % (plate.name, found, len(missing),
@@ -336,14 +335,15 @@ class ORCA_OT_import_project(bpy.types.Operator):
     filter_glob: bpy.props.StringProperty(default="*.3mf;*.3MF", options={'HIDDEN'})
     plate_paths: bpy.props.BoolProperty(
         name="Plate names are folders", default=False,
-        description="The plates are named after the folders of their parts (tight/cap_loose): a part Orca kept "
-                    "only the file name of is taken from that folder or a folder above it, up to the project's "
-                    "STL folder, when exactly one of them holds it")
+        description="Each plate's name is its folder below the STL folder set here (tight/cap_loose): a part Orca "
+                    "kept only the file name of is taken from that folder or a folder above it, up to the STL "
+                    "folder, when exactly one of them holds it")
     stl_folder: bpy.props.StringProperty(
         name="STL folder",
-        description="The project's STL folder, below the STL root (GripV/buttons). Looking up from a plate's folder "
-                    "stops there. Empty: the folder all found parts share. A project already in the tab keeps its "
-                    "own")
+        description="The project's STL folder, below the STL root (GripV/buttons). With Plate names are folders, "
+                    "plate names are read as paths below it, and looking up stops there. Empty: the STL root (the "
+                    "project's STL folder then becomes the folder all found parts share). A project already in the "
+                    "tab keeps its own")
 
     def invoke(self, context, event):
         root = props.project_root(context.scene)
@@ -398,10 +398,11 @@ class ORCA_OT_import_project(bpy.types.Operator):
         if old is None:
             if self.stl_folder:
                 project.stl_folder = self.stl_folder.replace("\\", "/").strip("/")
+            elif plate_paths:
+                project.stl_folder = ""  # the plate names were read from the STL root
             else:
                 project.stl_folder = build3mf.common_folder([r for r in rel.values() if not os.path.isabs(r)])
         lines = ["%s %s" % ("Imported again" if old is not None else "Imported", props.shown(scene, path))]
-        folders = {}  # the folders below the STL root, read once
         for name, parts in plates:
             plate = project.plates.add()
             plate.name = name
@@ -426,12 +427,6 @@ class ORCA_OT_import_project(bpy.types.Operator):
                 part.mirror = p.mirror
                 if p.stl and p.note:
                     lines.append("  %s: %s" % (p.name, p.note))
-            if plate_paths:  # the plate's STL folder is the folder it is named after
-                top_now = props.project_stl_folder(scene, project)
-                leaves = [d for d in build3mf.plate_folders(name, [stl_root], folders)
-                          if build3mf._inside(d, top_now)]
-                if len(leaves) == 1:
-                    _set_plate_folder(scene, project, plate, leaves[0])
         props.set_known_objects(project, {build3mf.object_key(build3mf.plate_key(name, n), p.name, p.source)
                                           for n, (name, parts) in enumerate(plates) for p in parts})
         lines += ["  problem: %s" % p for p in problems]
@@ -441,18 +436,6 @@ class ORCA_OT_import_project(bpy.types.Operator):
                     "Imported %d plates, %d parts%s" % (len(plates), count,
                                                          "; check the Info panel" if problems else ""))
         return {'FINISHED'}
-
-
-def _set_plate_folder(scene, project, plate, folder):
-    """Makes folder the plate's STL folder (from the project's, ../ when outside it), keeping where its parts are."""
-    stls = [props.part_path(scene, project, plate, p) if p.path else "" for p in plate.parts]
-    marks = [(p.mark, p.mark_note) for p in plate.parts]
-    rel = paths.relative_form(folder, props.project_stl_folder(scene, project))
-    plate.stl_folder = "" if rel == "." else rel
-    for part, stl, (mark, note) in zip(plate.parts, stls, marks):
-        if stl and os.path.isfile(stl):  # a missing part keeps what Orca stored (often only its name)
-            part.path = props.part_relative(scene, project, plate, stl)
-            part.mark, part.mark_note = mark, note  # changing the path clears them
 
 
 def _tab_links(scene, project):

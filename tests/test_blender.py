@@ -312,7 +312,7 @@ class OrcaTabTest(unittest.TestCase):
         # On: the folders above it too, and the plate is named after the folder
         project.plate_paths = True
         self.assertEqual(bpy.ops.orca_reload.relink(directory=folder), {'FINISHED'})
-        self.assertEqual(plate.name, "tight/cap_loose")
+        self.assertEqual(plate.name, "buttons/tight/cap_loose")  # its path below the project's STL folder
         from bl_ext.orca_test.orca_3mf import props
         got = [os.path.normpath(props.part_path(scene, project, plate, p)) for p in plate.parts]
         self.assertEqual(got[:2], [os.path.join(root, "buttons", "tight", "button.stl"),
@@ -370,6 +370,32 @@ class OrcaTabTest(unittest.TestCase):
         plate.parts.remove(1)
         self.build()
         self.assertEqual([os.path.basename(p) for p in self.source_files()], ["box.stl"])
+
+    def test_plate_names_are_folders_switch_renames_and_moves_plates(self):
+        from bl_ext.orca_test.orca_3mf import props
+        scene = bpy.context.scene
+        root = os.path.join(self.dir, "stl", "GripV")
+        for tol in ("tight", "loose"):
+            fixtures.write_stl(os.path.join(root, tol, "button.stl"), fixtures.box((5, 5, 2)))
+            fixtures.write_stl(os.path.join(root, tol, "cap_loose", "dpad.stl"), fixtures.box((6, 4, 2)))
+        project = self.add_project()  # its STL folder is GripV
+        self.add_part(path="tight/button.stl")
+        self.add_part(path="tight/cap_loose/dpad.stl")
+        plate = project.plates[0]
+
+        def files():
+            return [os.path.relpath(props.part_path(scene, project, plate, p), root).replace(os.sep, "/")
+                    for p in plate.parts]
+        self.assertEqual(files(), ["tight/button.stl", "tight/cap_loose/dpad.stl"])
+        project.plate_paths = True  # named after the deepest folder its parts share; same files
+        self.assertEqual(plate.name, "tight/cap_loose")
+        self.assertEqual([p.path for p in plate.parts], ["../button.stl", "dpad.stl"])
+        self.assertEqual(files(), ["tight/button.stl", "tight/cap_loose/dpad.stl"])
+        plate.name = "loose/cap_loose"  # renaming points the plate at another folder
+        self.assertEqual(files(), ["loose/button.stl", "loose/cap_loose/dpad.stl"])
+        project.plate_paths = False  # its STL folder takes over; same files, the name stays
+        self.assertEqual((plate.name, plate.stl_folder), ("loose/cap_loose", "loose/cap_loose"))
+        self.assertEqual(files(), ["loose/button.stl", "loose/cap_loose/dpad.stl"])
 
     def test_import_saves_outside_and_missing_stls_from_the_plate_folder(self):
         from bl_ext.orca_test.orca_3mf import props

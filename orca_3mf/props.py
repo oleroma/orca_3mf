@@ -60,7 +60,11 @@ class OrcaPart(bpy.types.PropertyGroup):
 
 class OrcaPlate(bpy.types.PropertyGroup):
     use: bpy.props.BoolProperty(name="Build", default=True, description="Put this plate in the project")
-    name: bpy.props.StringProperty(name="Name", default="Plate", description="Name of the plate in Orca")
+    name: bpy.props.StringProperty(
+        name="Name", default="Plate",
+        description="Name of the plate in Orca. With \"Plate names are folders\" on, also its folder below the "
+                    "project's STL folder (tight/cap_loose): renaming it points the plate at another folder, red "
+                    "when there is no such folder")
     gap: bpy.props.FloatProperty(
         name="Gap", subtype='DISTANCE', default=DEFAULT_GAP, min=0.0, soft_max=30.0, precision=1,
         description="Space between the parts on this plate, and half of it to the plate's edge")
@@ -90,10 +94,13 @@ class OrcaProject(bpy.types.PropertyGroup):
                     "A relative path (../printer.3mf) starts at the .blend file's folder")
     plate_paths: bpy.props.BoolProperty(
         name="Plate names are folders",
-        description="Read each plate's name as the folder of its parts (tight/cap_loose). When Orca keeps only a "
-                    "part's file name, Import takes the file from that folder or the nearest folder above it, and "
-                    "Relink names the plate after the folder it finds the parts in. Off: plate names are only "
-                    "names, and parts are found by their stored paths alone")
+        description="Each plate's name is its folder, below the project's STL folder (tight/cap_loose), and its "
+                    "parts' paths start there: renaming a plate points it at another folder. Turning it on names "
+                    "each plate after the deepest folder its parts share. When Orca keeps only a part's file name, "
+                    "Import takes the file from the plate's folder or a folder above it. Off: plate names are only "
+                    "names, and each plate has its own STL folder",
+        update=lambda self, context: plate_paths_changed(context.scene, self))
+    plate_paths_was: bpy.props.BoolProperty(options={'HIDDEN'})  # what the parts' paths were written for
     overwrite: bpy.props.BoolProperty(
         name="Overwrite",
         description="On: Build writes into the project's 3MF itself. Off: the 3MF is never changed once it "
@@ -214,8 +221,84 @@ def project_stl_folder(scene, project):
     return paths.join(stl_root(scene), project.stl_folder)
 
 
-def plate_folder(scene, project, plate):
-    return paths.join(stl_root(scene), project.stl_folder, plate.stl_folder if plate else "")
+def plate_folder(scene, project, plate, by_name=None):
+    """The plate's folder: its name below the project's STL folder while "Plate names are folders" is on (by_name),
+    else its own STL folder."""
+    by_name = project.plate_paths if by_name is None else by_name
+    sub = (plate.name if by_name else plate.stl_folder) if plate else ""
+    return paths.join(stl_root(scene), project.stl_folder, sub)
+
+
+def deepest_line_folder(folders):
+    """The deepest of the folders when every other one is it or a folder above it, else None."""
+    folders = [os.path.normpath(os.path.abspath(f)) for f in folders]
+    if not folders:
+        return None
+    leaf = max(folders, key=len)
+    key = os.path.normcase(leaf)
+    for f in folders:
+        k = os.path.normcase(f)
+        if not (key == k or key.startswith(k.rstrip(os.sep) + os.sep)):
+            return None
+    return leaf
+
+
+def move_plate(scene, project, plate, folder=None, name=None):
+    """Points the plate at another folder (or, with the switch on, gives it another name), keeping the file of
+    every part that is there: their paths are written again from the new folder. Marks stay."""
+    stls = [part_path(scene, project, plate, p) if p.path else "" for p in plate.parts]
+    marks = [(p.mark, p.mark_note) for p in plate.parts]
+    if name is not None:
+        plate.name = name
+    if folder is not None:
+        rel = paths.relative_form(folder, project_stl_folder(scene, project))
+        rel = "" if rel == "." else rel
+        if project.plate_paths:
+            plate.name = rel
+        else:
+            plate.stl_folder = rel
+    for part, stl, (mark, note) in zip(plate.parts, stls, marks):
+        if stl and os.path.isfile(stl):  # a missing part keeps what Orca stored (often only its name)
+            part.path = part_relative(scene, project, plate, stl)
+            part.mark, part.mark_note = mark, note  # changing the path clears them
+
+
+def plate_paths_changed(scene, project):
+    """"Plate names are folders" was turned on or off: every part keeps its file. Turned on, each plate is named
+    after the deepest folder its parts share, when they all sit in one line of folders below the project's STL
+    folder; turned off, each plate's STL folder becomes the folder its name pointed at."""
+    on = project.plate_paths
+    if on == project.plate_paths_was:  # set to what it was: nothing to move
+        return
+    project.plate_paths_was = on
+    top = project_stl_folder(scene, project)
+    for plate in project.plates:
+        stls_before = {}
+        for part in plate.parts:  # where each part was, read the old way
+            if part.path:
+                stls_before[part.as_pointer()] = paths.join(plate_folder(scene, project, plate, by_name=not on),
+                                                            part.path) if not part.path.startswith("//") else \
+                    absolute(part.path)
+        found = [s for s in stls_before.values() if os.path.isfile(s)]
+        marks = [(p.mark, p.mark_note) for p in plate.parts]
+        if on:
+            leaf = deepest_line_folder([os.path.dirname(s) for s in found])
+            inside = leaf is not None and (os.path.normcase(leaf) == os.path.normcase(os.path.abspath(top)) or
+                                           os.path.normcase(leaf).startswith(
+                                               os.path.normcase(os.path.abspath(top)).rstrip(os.sep) + os.sep))
+            if inside:
+                rel = paths.relative_form(leaf, top)
+                if rel != ".":
+                    plate.name = rel
+        else:
+            old = plate_folder(scene, project, plate, by_name=True)
+            rel = paths.relative_form(old, top)
+            plate.stl_folder = "" if rel == "." else rel
+        for part, (mark, note) in zip(plate.parts, marks):
+            stl = stls_before.get(part.as_pointer())
+            if stl and os.path.isfile(stl):
+                part.path = part_relative(scene, project, plate, stl)
+                part.mark, part.mark_note = mark, note
 
 
 def part_path(scene, project, plate, part):

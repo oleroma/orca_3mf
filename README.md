@@ -75,8 +75,10 @@ Each part's place on the plate is set again by the nesting, unless the plate's p
 
 1. the path Orca stored, when the file is there;
 2. on a re-import, the tab's own link for that file name on that plate, when it is the only one;
-3. with **Plate names are folders** ticked (in the Import window, and per project in the tab): the plate's name read as its folder, like `tight/cap_loose`. The name must match exactly one folder below the project's STL folder (two matches: nothing is taken, and a longer name is offered), and the file must be in exactly one of that folder and the folders above it, up to the project's STL folder. Never a sibling folder;
+3. with **Plate names are folders** ticked (in the Import window, and per project in the tab): the plate's name read as its folder, a path below the project's STL folder like `tight/cap_loose` (set the STL folder in the Import window; empty, it is the STL root). The file must be in exactly one of that folder and the folders above it, up to the project's STL folder. Never a sibling folder;
 4. the stored path's folders below the STL root.
+
+With **Plate names are folders** on, a plate's name *is* its folder: the plate's own STL folder field goes away, its parts' paths start at that folder (`dpad.stl`, `../button.stl`), and renaming the plate points it at another folder (the name turns red when there is no such folder). Turning it on names each plate after the deepest folder its parts share, when they sit in one line of folders; turning it off gives each plate that folder as its STL folder. Either way every part keeps its file. For a 3MF whose plates aren't named after folders yet: import it with the switch off, then turn it on in the project box.
 
 Anything else comes in red with the reason. **Relink missing parts** (under the parts list) fixes the whole plate at once: pick a folder, each missing part is looked for in that folder only; with Plate names are folders ticked also in the folders above it, and the plate is named after the folder so the next import finds its parts by itself. Each part also has its own folder button. Import's **STL folder** field sets the project's STL folder where looking up stops; empty, it is the folder all found parts share.
 

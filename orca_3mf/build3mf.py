@@ -986,9 +986,8 @@ def _find_source(part, finder, project_dir, plate_name, folders, top=None, known
     several tolerances has the same file name in each folder), in this order:
     1. the stored path (absolute, or from the 3MF's folder), when the file is there;
     2. known(file name): the link the tab already had for this part (a re-import), or None;
-    3. plate_name read as a folder (only when given): the one folder below the STL root whose path ends in it, and
-       the folders above it up to top (the project's STL folder; default the STL root). The file must be in exactly
-       one of them; two folders named like the plate, or the file in two of them, take nothing;
+    3. plate_name read as a folder (only when given): that path below top (the project's STL folder; default the
+       STL root), and the folders above it up to top. The file must be in exactly one of them;
     4. the stored path's trailing folders below the STL root (at least one folder)."""
     stored = part.source
     if stored:
@@ -1005,21 +1004,17 @@ def _find_source(part, finder, project_dir, plate_name, folders, top=None, known
     plate_note = ""
     if plate_name:
         tops = [top] if top else finder.search_dirs
-        leaves = [d for d in plate_folders(plate_name, finder.search_dirs, folders)
-                  if any(_inside(d, t) for t in tops)]
-        if len(leaves) > 1:
-            longer = sorted(plate_name_for(d, finder.search_dirs, folders) for d in leaves)
-            return None, ("the plate name %s matches %d folders: use a longer name (%s)"
-                          % (plate_name, len(leaves), " or ".join(longer)))
-        if leaves:
-            hits = find_all_up(file_name, leaves[0], tops)
+        leaf = next((os.path.join(t, *_split(plate_name)) for t in tops
+                     if os.path.isdir(os.path.join(t, *_split(plate_name)))), None)
+        if leaf is not None:
+            hits = find_all_up(file_name, leaf, tops)
             if len(hits) == 1:
                 return hits[0], "from the plate's folders"
             if hits:
                 return None, "%s is in %d of the plate's folders" % (file_name, len(hits))
-            plate_note = "%s is not in the plate's folders" % file_name
+            plate_note = "%s is not in the plate's folder %s or the folders above it" % (file_name, plate_name)
         else:
-            plate_note = "no folder is named like the plate %s" % plate_name
+            plate_note = "there is no folder %s below the project's STL folder" % plate_name
     path, _ = finder.find(stored, project_dir, by_name=False)
     if path is not None:
         return path, ""
