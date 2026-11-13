@@ -520,6 +520,52 @@ class BuildTest(unittest.TestCase):
         self.build(spec)
         self.assertNotIn('b.stl', self.settings_xml())
 
+    def move_items(self, name, dx, dy):
+        """Moves every copy of the object named `name` by dx, dy in the root model, as if dragged in Orca."""
+        with zipfile.ZipFile(self.out) as z:
+            model = z.read(reload3mf.ROOT_MODEL).decode()
+            settings = z.read(reload3mf.MODEL_SETTINGS).decode()
+        oid = re.search(r'<object id="(\d+)">\s*<metadata key="name" value="%s"/>' % re.escape(name), settings).group(1)
+
+        def shift(m):
+            v = m.group(2).split()
+            v[9], v[10] = repr(float(v[9]) + dx), repr(float(v[10]) + dy)
+            return m.group(1) + " ".join(v) + '"'
+        model = re.sub(r'(<item objectid="%s"[^>]*transform=")([^"]*)"' % oid, shift, model)
+        self.replace_entry(reload3mf.ROOT_MODEL, model)
+
+    def test_keep_positions_keeps_matched_parts_and_nests_new_ones_around_them(self):
+        a, b, c = self.stls["a"], self.stls["b"], self.stls["c"]
+        self.build(self.spec([build3mf.PlateSpec("one", 5, [build3mf.PartSpec("a.stl", a, copies=2)]),
+                              build3mf.PlateSpec("two", 5, [build3mf.PartSpec("b.stl", b)])]))
+        self.move_items("a.stl", 7.0, -3.0)
+        self.move_items("b.stl", -11.0, 13.0)
+        before = {n: sorted((lo, hi) for name, _, lo, hi in self.placed() if name == n) for n in ("a.stl", "b.stl")}
+        # The plates swap places, a gets a third copy, c is new; both plates keep positions
+        self.build(self.spec([build3mf.PlateSpec("two", 5, [build3mf.PartSpec("b.stl", b)], keep=True),
+                              build3mf.PlateSpec("one", 5, [build3mf.PartSpec("a.stl", a, copies=3),
+                                                            build3mf.PartSpec("c.stl", c, copies=4)], keep=True)]))
+        placed = self.placed()
+        shift_one = layout.plate_origin(1, 2, (256, 256))[0] - layout.plate_origin(0, 2, (256, 256))[0]
+        got_a = sorted((lo, hi) for name, _, lo, hi in placed if name == "a.stl")
+        moved = sorted(((lo[0] + shift_one, lo[1], lo[2]), (hi[0] + shift_one, hi[1], hi[2])) for lo, hi in before["a.stl"])
+        def same(p, m):
+            return all(abs(x - y) < 1e-4 for x, y in zip(p[0] + p[1], m[0] + m[1]))
+        self.assertEqual(sum(1 for m in moved if any(same(p, m) for p in got_a)), 2)  # both old copies stayed
+        self.assertEqual(len(got_a), 3)
+        got_b = [(lo, hi) for name, _, lo, hi in placed if name == "b.stl"]
+        old_b = before["b.stl"][0]
+        for x, y in zip(got_b[0][0] + got_b[0][1], (old_b[0][0] - shift_one,) + old_b[0][1:] + (old_b[1][0] - shift_one,) + old_b[1][1:]):
+            self.assertAlmostEqual(x, y, places=4)
+        # Nothing on plate "one" overlaps
+        boxes = [(lo, hi) for name, _, lo, hi in placed if name in ("a.stl", "c.stl")]
+        self.assertEqual(len(boxes), 7)
+        for i in range(len(boxes)):
+            for j in range(i):
+                (l1, h1), (l2, h2) = boxes[i], boxes[j]
+                overlap = l1[0] < h2[0] - 1e-6 and l2[0] < h1[0] - 1e-6 and l1[1] < h2[1] - 1e-6 and l2[1] < h1[1] - 1e-6
+                self.assertFalse(overlap, (boxes[i], boxes[j]))
+
     def test_part_taller_than_printable_height_is_reported(self):
         make_template(self.template, printable_height="30")
         plates = [build3mf.PlateSpec("p", 5, [build3mf.PartSpec("b.stl", self.stls["b"], (0, 0, 1))])]

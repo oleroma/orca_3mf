@@ -86,10 +86,14 @@ class PartSpec:
 
 
 class PlateSpec:
-    def __init__(self, name="", gap=6.0, parts=()):
+    """A plate: its name, the gap between its parts, its parts, and whether parts found in the old project keep
+    where they stood on it (keep: only new parts and new copies are nested, around them)."""
+
+    def __init__(self, name="", gap=6.0, parts=(), keep=False):
         self.name = name
         self.gap = gap
         self.parts = list(parts)
+        self.keep = keep
 
 
 class ProjectSpec:
@@ -499,6 +503,35 @@ def _kept_objects(base, plate, plate_no, known, warnings):
     return out
 
 
+def _old_spots(obj, base, plate_name, plate_no, bed_corner, grid):
+    """Where the copies of obj's old object stood, as (x, y) centres of their footprints on the plate (from its
+    front left corner, like nest's positions), at most as many as the part has copies. The plate may have moved
+    in the grid: the spots move with it."""
+    old = obj.old
+    if old is None or old.part is None or base.project is None:
+        return []
+    project_obj = base.project.objects.get(old.id)
+    if project_obj is None:
+        return []
+    key = plate_key(plate_name, plate_no)
+    index = next((i for i, (name, _) in enumerate(base.plates) if plate_key(name, i) == key), None)
+    if index is None:
+        return []
+    old_x, old_y = layout.plate_origin(index, len(base.plates), grid)
+    try:
+        mesh = base.project.old_mesh(old.part)
+    except ReloadError:
+        return []
+    part = reload3mf.parse_transform(old.part.transform)
+    bed_x0, bed_y0 = bed_corner
+    spots = []
+    for item_index in project_obj.items[:obj.spec.copies]:
+        rows, t = reload3mf.compose(reload3mf.parse_transform(base.project.items[item_index][1]), part)
+        lo, hi = layout.footprint(mesh.verts, rows)
+        spots.append((t[0] + (lo[0] + hi[0]) / 2.0 - old_x - bed_x0, t[1] + (lo[1] + hi[1]) / 2.0 - old_y - bed_y0))
+    return spots
+
+
 def plan(spec, base, stl_cache=None):
     """Works out every object of the project and where its copies go. Returns (objects, problems, bed)."""
     stl_cache = {} if stl_cache is None else stl_cache
@@ -521,18 +554,30 @@ def plan(spec, base, stl_cache=None):
                 continue
             plate_objects.append(obj)
         plate_objects += _kept_objects(base, plate, plate_no, spec.known, base.dropped)
+        ox, oy = layout.plate_origin(plate_no, count, grid)
+        blocked = []
+        kept_copies = {}
+        if plate.keep:
+            for obj in plate_objects:
+                spots = _old_spots(obj, base, plate.name, plate_no, (x0, y0), grid)
+                kept_copies[id(obj)] = len(spots)
+                for cx, cy in spots:
+                    lo_x = cx - (obj.hi[0] - obj.lo[0]) / 2.0
+                    lo_y = cy - (obj.hi[1] - obj.lo[1]) / 2.0
+                    blocked.append((lo_x, lo_y, obj.hi[0] - obj.lo[0], obj.hi[1] - obj.lo[1]))
+                    obj.transforms.append((obj.rotation, (ox + x0 + lo_x - obj.lo[0], oy + y0 + lo_y - obj.lo[1],
+                                                          -obj.lo[2])))
         sizes, owners = [], []
         for obj in plate_objects:
             size = (obj.hi[0] - obj.lo[0], obj.hi[1] - obj.lo[1])
-            for _ in range(obj.spec.copies):
+            for _ in range(obj.spec.copies - kept_copies.get(id(obj), 0)):
                 sizes.append(size)
                 owners.append(obj)
-        positions, left_out = layout.nest(sizes, (width, depth), plate.gap)
+        positions, left_out = layout.nest(sizes, (width, depth), plate.gap, blocked=blocked)
         for i in left_out:
             obj = owners[i]
             problems.append("plate %d, %s: does not fit on the plate (%.1f x %.1f mm with a %.1f mm gap)"
                             % (plate_no + 1, obj.spec.name, sizes[i][0], sizes[i][1], plate.gap))
-        ox, oy = layout.plate_origin(plate_no, count, grid)
         for i, pos in enumerate(positions):
             if pos is None:
                 continue

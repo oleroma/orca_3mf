@@ -103,6 +103,7 @@ class ORCA_UL_plates(bpy.types.UIList):
         row.label(text="%d" % (index + 1))
         row.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
+        tools.prop(item, "keep", text="", icon='PINNED' if item.keep else 'UNPINNED', emboss=False)
         tools.label(text="", icon=ICONS['GAP'])
         tools.prop(item, "gap", text="", emboss=False)
         tools.separator(factor=0.5)

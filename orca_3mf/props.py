@@ -67,6 +67,11 @@ class OrcaPlate(bpy.types.PropertyGroup):
     stl_folder: bpy.props.StringProperty(
         name="STL folder", description="Folder of this plate's parts, below the project's STL folder. "
                                        "Use / between folders")
+    keep: bpy.props.BoolProperty(
+        name="Keep positions", default=False,
+        description="Parts found in the project's 3MF keep where they stand on this plate (moved by hand in Orca), "
+                    "with their copies; only new parts and new copies are nested, around them. Off: the whole "
+                    "plate is nested again")
     parts: bpy.props.CollectionProperty(type=OrcaPart)
     part_index: bpy.props.IntProperty()
 

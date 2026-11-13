@@ -277,6 +277,7 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual((imported.name, imported.folder, imported.stl_folder), ("GripV_parts.3mf", "GripV",
                                                                                "GripV/parts"))
         self.assertFalse(imported.overwrite)
+        self.assertTrue(all(p.keep for p in imported.plates))  # placed in Orca: kept where they are
         imported.overwrite = True
         self.assertEqual(len(imported.plates), 2)
         part = imported.plates[1].parts[0]

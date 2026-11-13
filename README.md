@@ -67,7 +67,7 @@ An **existing** project is never changed unless **Overwrite the 3MF** is ticked 
 - variable layer heights, height range modifiers and brim ears (`layer_heights_profile.txt`, `layer_config_ranges.xml`, `brim_ear_points.txt`), re-keyed to the part's new position
 - per-layer custom G-code (`custom_gcode_per_layer.xml`), re-keyed to the plate's new position
 
-Each part's place on the plate is set again by the nesting. Objects made of several STLs are not built, and what Build does not keep yet is listed under Not done yet.
+Each part's place on the plate is set again by the nesting, unless the plate's pin (**Keep positions**, in the Plates list) is on: then every part found in the 3MF by the exact match above keeps where it stood, with its copies (moved by hand in Orca, or a plate that moved in the grid), and only new parts and new copies are nested around them. Imported plates start with the pin on. A part whose shape or Up changed keeps the centre of its spot. Objects made of several STLs are not built, and what Build does not keep yet is listed under Not done yet.
 
 ## Import
 
@@ -100,7 +100,6 @@ Orca stores each part's mesh centred on itself, and the part's place and rotatio
 ## Not done yet
 
 - Seam blockers (places the seam must avoid).
-- Keeping parts where they were placed by hand in Orca: Build always nests.
 - Nesting by outline: parts are nested by their bounding box, so L-shaped parts leave space unused.
 - Curves made by Geometry Nodes: a curve object's modifiers are ignored. A mesh object with Geometry Nodes works when its nodes output mesh edges (add Curve to Mesh).
 - Scale set in Orca is dropped on Import.

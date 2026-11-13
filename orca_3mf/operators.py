@@ -375,14 +375,14 @@ class ORCA_OT_import_project(bpy.types.Operator):
             self.report({'ERROR'}, "%s: %s" % (os.path.basename(path), e))
             return {'CANCELLED'}
 
-        kept = {}  # (plate name, STL) -> what only the tab holds: Build ticks and seams
+        kept = {}  # (plate name, STL) -> what only the tab holds: Build ticks, keep positions, seams
         if old is not None:
             project = old
             settings.project_index = list(settings.projects).index(old)
             for plate in project.plates:
                 for part in plate.parts:
                     kept[(plate.name, os.path.normcase(props.part_path(scene, project, plate, part)))] = (
-                        plate.use, plate.gap, part.use, part.seam)
+                        plate.use, plate.gap, plate.keep, part.use, part.seam)
             project.plates.clear()
         else:
             project = settings.projects.add()
@@ -405,6 +405,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
         for name, parts in plates:
             plate = project.plates.add()
             plate.name = name
+            plate.keep = True  # placed in Orca: stays where it is until unticked
             below = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in parts if p.stl]
             plate.stl_folder = build3mf.common_folder([p for p in below if not os.path.isabs(p)])
             for p in parts:
@@ -414,7 +415,7 @@ class ORCA_OT_import_project(bpy.types.Operator):
                     part.path = props.part_relative(scene, project, plate, p.stl)
                     same = kept.get((name, os.path.normcase(p.stl)))
                     if same is not None:
-                        plate.use, plate.gap, part.use, part.seam = same
+                        plate.use, plate.gap, plate.keep, part.use, part.seam = same
                 else:
                     part.path = _source_path(scene, project, plate, p.source, os.path.dirname(path))
                     problems.append("%s: %s not found below the STL root, %s" % (p.name, p.source, p.note))
@@ -519,7 +520,7 @@ def project_spec(context, project, painted):
             parts.append(build3mf.PartSpec(part.label(), stl, part.up, part.angle, part.copies, seam,
                                            mirror=part.mirror, source=_source_file(scene, project, stl)))
             parts[-1].where = (plate_index, part_index)  # to mark the tab's part after the build
-        plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
+        plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts, keep=plate.keep))
     template = props.absolute(project.template)
     roots = props.roots(scene)
     return build3mf.ProjectSpec(props.project_path(scene, project), plates, template,
