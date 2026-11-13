@@ -312,7 +312,7 @@ class OrcaTabTest(unittest.TestCase):
         # On: the folders above it too, and the plate is named after the folder
         project.plate_paths = True
         self.assertEqual(bpy.ops.orca_reload.relink(directory=folder), {'FINISHED'})
-        self.assertEqual(plate.name, "buttons/tight/cap_loose")  # its path below the project's STL folder
+        self.assertEqual(plate.name, "buttons/tight/cap_loose")  # the deepest folder its parts share
         from bl_ext.orca_test.orca_3mf import props
         got = [os.path.normpath(props.part_path(scene, project, plate, p)) for p in plate.parts]
         self.assertEqual(got[:2], [os.path.join(root, "buttons", "tight", "button.stl"),
@@ -393,6 +393,19 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual(files(), ["tight/button.stl", "tight/cap_loose/dpad.stl"])
         plate.name = "loose/cap_loose"  # renaming points the plate at another folder
         self.assertEqual(files(), ["loose/button.stl", "loose/cap_loose/dpad.stl"])
+        # A plate whose name isn't a folder: picking its parts' files names it once all are found
+        plate.name = "Plate 1"
+        plate.parts[0].path = "button.stl"  # missing now
+        plate.parts[1].path = "x/dpad.stl"
+        bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "button.stl"))  # the active part
+        self.assertEqual(plate.name, "Plate 1")  # dpad still missing
+        plate.part_index = 1
+        bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "cap_loose", "dpad.stl"))
+        plate.part_index = 0
+        bpy.ops.orca_reload.browse_part(filepath=os.path.join(root, "tight", "button.stl"))
+        self.assertEqual(plate.name, "tight/cap_loose")
+        self.assertEqual(files(), ["tight/button.stl", "tight/cap_loose/dpad.stl"])
+        plate.name = "loose/cap_loose"
         project.plate_paths = False  # its STL folder takes over; same files, the name stays
         self.assertEqual((plate.name, plate.stl_folder), ("loose/cap_loose", "loose/cap_loose"))
         self.assertEqual(files(), ["loose/button.stl", "loose/cap_loose/dpad.stl"])

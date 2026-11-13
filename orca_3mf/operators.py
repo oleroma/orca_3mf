@@ -234,6 +234,9 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         part.path = props.part_relative(context.scene, project, plate, os.path.normpath(self.filepath))
         if not part.name or part.name in {old_file, os.path.splitext(old_file)[0]}:
             part.name = os.path.basename(self.filepath)
+        if not os.path.isdir(props.plate_folder(context.scene, project, plate)):
+            # A plate whose name isn't a folder yet takes the folder its parts share once all are found
+            props.name_plate_from_parts(context.scene, project, plate, whole=True)
         return {'FINISHED'}
 
 
@@ -288,8 +291,8 @@ class ORCA_OT_relink(bpy.types.Operator):
             if hit:
                 part.path = props.part_relative(scene, project, plate, hit)
                 found += 1
-        if project.plate_paths:  # the plate's name is now the picked folder
-            props.move_plate(scene, project, plate, folder=folder)
+        # The plate's name: the deepest folder its parts share, else the picked folder
+        props.name_plate_from_parts(scene, project, plate, fallback=folder)
         left = len(missing) - found
         self.report({'WARNING'} if left else {'INFO'},
                     "Plate %s: %d of %d missing parts found%s" % (plate.name, found, len(missing),

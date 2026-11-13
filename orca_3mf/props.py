@@ -263,6 +263,27 @@ def move_plate(scene, project, plate, folder=None, name=None):
             part.mark, part.mark_note = mark, note  # changing the path clears them
 
 
+def name_plate_from_parts(scene, project, plate, fallback=None, whole=False):
+    """With "Plate names are folders" on: names the plate after the deepest folder its found parts share, when they
+    sit in one line of folders below the project's STL folder (else after fallback, a folder, when given). whole:
+    only when none of its parts is missing. Every part keeps its file. True when it was named."""
+    if not project.plate_paths:
+        return False
+    stls = [part_path(scene, project, plate, p) if p.path else "" for p in plate.parts]
+    found = [s for s in stls if s and os.path.isfile(s)]
+    if not found or (whole and len(found) != len(stls)):
+        return False
+    leaf = deepest_line_folder([os.path.dirname(s) for s in found])
+    top = os.path.normcase(os.path.abspath(project_stl_folder(scene, project)))
+    if leaf is not None and os.path.normcase(leaf).startswith(top.rstrip(os.sep) + os.sep):
+        move_plate(scene, project, plate, folder=leaf)
+        return True
+    if fallback:
+        move_plate(scene, project, plate, folder=fallback)
+        return True
+    return False
+
+
 def plate_paths_changed(scene, project):
     """"Plate names are folders" was turned on or off: every part keeps its file. Turned on, each plate is named
     after the deepest folder its parts share, when they all sit in one line of folders below the project's STL
