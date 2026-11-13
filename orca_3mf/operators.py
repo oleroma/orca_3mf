@@ -99,8 +99,17 @@ def _new_project(scene, project, previous):
             project.template = props.blend_relative(props.project_path(scene, previous))
 
 
+def _start_folder(scene, project, folder):
+    """Where a file browser opens: the folder if it exists, else the project's STL folder, else the STL root."""
+    for f in (folder, props.project_stl_folder(scene, project) if project else "", props.stl_root(scene)):
+        if f and os.path.isdir(f):
+            return f
+    return ""
+
+
 def _stl_browser(operator, context, folder):
-    operator.directory = folder + os.sep if os.path.isdir(folder) else ""
+    folder = _start_folder(context.scene, props.active_project(context.scene.orca_reload), folder)
+    operator.directory = folder + os.sep if folder else ""
     context.window_manager.fileselect_add(operator)
     return {'RUNNING_MODAL'}
 
@@ -264,10 +273,8 @@ class ORCA_OT_relink(bpy.types.Operator):
     def invoke(self, context, event):
         scene = context.scene
         project = props.active_project(scene.orca_reload)
-        folder = props.plate_folder(scene, project, props.active_plate(project))
-        if not os.path.isdir(folder):
-            folder = props.stl_root(scene)
-        self.directory = folder + os.sep if os.path.isdir(folder) else ""
+        folder = _start_folder(scene, project, props.plate_folder(scene, project, props.active_plate(project)))
+        self.directory = folder + os.sep if folder else ""
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
