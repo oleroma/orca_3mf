@@ -889,13 +889,18 @@ def read_layout(path, finder, stl_cache=None, plate_paths=False, top=None, known
                    for inst in plate.findall("model_instance")]
             plates.append((int(meta.get("plater_id") or len(plates) + 1), meta.get("plater_name") or "", ids))
         plates.sort(key=lambda p: p[0])
+        listed_on = {}  # object id -> how many plates list it
+        for _, _, ids in plates:
+            for oid in set(ids):
+                listed_on[oid] = listed_on.get(oid, 0) + 1
         out = []
         folders = {}  # the folders below the STL root, read once
         for _, name, ids in plates:
             parts, seen = [], {}
             for oid in ids:
                 if oid in seen:
-                    seen[oid].copies += 1
+                    seen[oid].listed += 1
+                    seen[oid].copies = max(seen[oid].copies, seen[oid].listed)
                     continue
                 obj = project.objects.get(oid)
                 if obj is None:
@@ -918,7 +923,11 @@ def read_layout(path, finder, stl_cache=None, plate_paths=False, top=None, known
                 stl, note = _find_source(part, finder, project_dir, name if plate_paths else "", folders, top,
                                          (lambda f, n=name: known(n, f)) if known else None)
                 angle = math.radians(round(math.degrees(angle), 4))  # drop float noise: 30.0000001 degrees is 30
-                imported = ImportedPart(obj.name, part.source, up, angle, 1, stl, note, mirror=mirror)
+                # Orca may list only an object's first copy on its plate: an object on one plate has every build
+                # item (copy) of it there
+                copies = len(obj.items) if listed_on.get(oid) == 1 and obj.items else 1
+                imported = ImportedPart(obj.name, part.source, up, angle, copies, stl, note, mirror=mirror)
+                imported.listed = 1  # copies the plate lists; more are counted below
                 seen[oid] = imported
                 parts.append(imported)
             out.append((name, parts))

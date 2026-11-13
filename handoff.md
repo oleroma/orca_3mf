@@ -32,7 +32,7 @@
 ## Verification
 
 ```
-python -I tests/test_build.py        # 29 OK
+python -I tests/test_build.py        # 30 OK
 python -I tests/test_seams.py        # 8 OK
 python -I tests/test_reload.py       # 17 OK
 python -I tests/test_paths.py        # 19 OK

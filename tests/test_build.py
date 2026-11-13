@@ -207,6 +207,18 @@ class BuildTest(unittest.TestCase):
                        ("b.stl", (1.0, 0.0, 0.0), 0.0, 1, self.stls["b"])]),
             ("second", [("c.stl", (0.0, 0.0, 1.0), 0.0, 4, self.stls["c"])])])
 
+    def test_copies_count_when_orca_lists_only_the_first_on_its_plate(self):
+        # Orca can list only instance 0 of an object on its plate while the 3MF holds 4 build items of it
+        self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("a.stl", self.stls["a"], copies=4)])]))
+        text = self.settings_xml()
+        blocks = re.findall(r"    <model_instance>.*?</model_instance>\n", text, re.S)
+        self.assertEqual(len(blocks), 4)
+        for block in blocks[1:]:
+            text = text.replace(block, "", 1)
+        self.replace_entry(reload3mf.MODEL_SETTINGS, text)
+        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([os.path.join(self.dir, "stl")]))
+        self.assertEqual(plates[0][1][0].copies, 4)
+
     def test_same_file_name_in_several_folders_comes_from_the_plate_folder(self):
         # Every tolerance has its own button.stl and dpad.stl, all the same shape; Orca kept only the file names.
         # The plate named after a folder says which: dpad.stl from that folder, button.stl from the folder above.
