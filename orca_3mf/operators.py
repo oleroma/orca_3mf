@@ -86,6 +86,42 @@ class ORCA_OT_list_action(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ORCA_OT_copy_action(bpy.types.Operator):
+    bl_idname = "orca_reload.copy_action"
+    bl_label = "Copies"
+    bl_options = {'UNDO', 'INTERNAL'}
+    action: bpy.props.EnumProperty(items=(('ADD', "", ""), ('REMOVE', "", ""), ('NEST', "", "")))
+
+    @classmethod
+    def description(cls, context, properties):
+        return {
+            'ADD': "Add a copy: the next Build nests it in free space and records where it went",
+            'REMOVE': "Remove the active copy",
+            'NEST': "Let the next Build nest every copy of this part again, around the plate's other parts",
+        }[properties.action]
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return props.active_part(props.active_plate(project)) is not None
+
+    def execute(self, context):
+        part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+        if part is None:
+            return {'CANCELLED'}
+        part.copies = part.copies  # gives a part saved before spots its rows
+        if self.action == 'ADD':
+            part.instances.add()
+            part.instance_index = len(part.instances) - 1
+        elif self.action == 'REMOVE' and len(part.instances) > 1 and 0 <= part.instance_index < len(part.instances):
+            part.instances.remove(part.instance_index)
+            part.instance_index = max(0, min(part.instance_index, len(part.instances) - 1))
+        elif self.action == 'NEST':
+            for copy in part.instances:
+                copy.placed = False
+        return {'FINISHED'}
+
+
 def _new_project(scene, project, previous):
     """A new project starts with one plate and the printer settings of the project before it."""
     project.name = "project_%d" % len(scene.orca_reload.projects)
@@ -93,14 +129,25 @@ def _new_project(scene, project, previous):
     if previous is not None:
         project.folder = previous.folder
         project.stl_folder = previous.stl_folder
+        project.profiles, project.orca_metadata = previous.profiles, previous.orca_metadata
+        project.profiles_from = previous.profiles_from
         if previous.template:
             project.template = previous.template
         elif os.path.isfile(props.project_path(scene, previous)):
             project.template = props.blend_relative(props.project_path(scene, previous))
 
 
+def _start_folder(scene, project, folder):
+    """Where a file browser opens: the folder if it exists, else the project's STL folder, else the STL root."""
+    for f in (folder, props.project_stl_folder(scene, project) if project else "", props.stl_root(scene)):
+        if f and os.path.isdir(f):
+            return f
+    return ""
+
+
 def _stl_browser(operator, context, folder):
-    operator.directory = folder + os.sep if os.path.isdir(folder) else ""
+    folder = _start_folder(context.scene, props.active_project(context.scene.orca_reload), folder)
+    operator.directory = folder + os.sep if folder else ""
     context.window_manager.fileselect_add(operator)
     return {'RUNNING_MODAL'}
 
@@ -198,19 +245,29 @@ class ORCA_OT_add_parts(bpy.types.Operator):
             part.name = name
         if names:
             plate.part_index = len(plate.parts) - 1
+            if not os.path.isdir(props.plate_folder(context.scene, project, plate)):
+                # A plate whose name isn't a folder yet takes the folder its parts share once all are found
+                props.name_plate_from_parts(context.scene, project, plate, whole=True)
         return {'FINISHED'}
 
 
 class ORCA_OT_browse_part(bpy.types.Operator):
     bl_idname = "orca_reload.browse_part"
     bl_label = "Pick STL"
-    bl_description = "Pick the active part's STL file"
+    bl_description = "Pick the part's STL file: any file, also one with another name"
     bl_options = {'UNDO', 'INTERNAL'}
     filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
     directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
     filter_glob: bpy.props.StringProperty(default="*.stl", options={'HIDDEN'})
+    part: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})  # from a part row: that part
+
+    def _pick(self, context):
+        plate = props.active_plate(props.active_project(context.scene.orca_reload))
+        if plate is not None and 0 <= self.part < len(plate.parts):
+            plate.part_index = self.part
 
     def invoke(self, context, event):
+        self._pick(context)
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = props.active_plate(project)
@@ -218,12 +275,13 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         if part is None:
             return {'CANCELLED'}
         current = props.part_path(context.scene, project, plate, part) if part.path else ""
-        if current:
+        if current and os.path.isfile(current):
             self.filepath = current
         return _stl_browser(self, context, os.path.dirname(current) if current else
                             props.plate_folder(context.scene, project, plate))
 
     def execute(self, context):
+        self._pick(context)
         settings = context.scene.orca_reload
         project = props.active_project(settings)
         plate = props.active_plate(project)
@@ -234,6 +292,99 @@ class ORCA_OT_browse_part(bpy.types.Operator):
         part.path = props.part_relative(context.scene, project, plate, os.path.normpath(self.filepath))
         if not part.name or part.name in {old_file, os.path.splitext(old_file)[0]}:
             part.name = os.path.basename(self.filepath)
+        if not os.path.isdir(props.plate_folder(context.scene, project, plate)):
+            # A plate whose name isn't a folder yet takes the folder its parts share once all are found
+            props.name_plate_from_parts(context.scene, project, plate, whole=True)
+        return {'FINISHED'}
+
+
+def missing_parts(scene, project, plate):
+    """The plate's parts whose STL file is not there."""
+    return [p for p in plate.parts if not p.path or not os.path.isfile(props.part_path(scene, project, plate, p))]
+
+
+class ORCA_OT_relink(bpy.types.Operator):
+    bl_idname = "orca_reload.relink"
+    bl_label = "Relink Missing Parts"
+    bl_description = ("Pick the folder of this plate's parts. Each part whose STL is missing is looked for by its "
+                      "file name in that folder only. With \"Plate names are folders\" on, also in the folders "
+                      "above it up to the project's STL folder (never a sibling), and the plate is named after the "
+                      "folder (tight/cap_loose), so Import finds its parts again even when Orca keeps only their "
+                      "file names. A file found in two of those folders is not taken")
+    bl_options = {'UNDO', 'INTERNAL'}
+    directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
+    filter_folder: bpy.props.BoolProperty(default=True, options={'HIDDEN'})
+    plate: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})  # from a plate row: that plate
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_plate(props.active_project(context.scene.orca_reload)) is not None
+
+    def invoke(self, context, event):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        if 0 <= self.plate < len(project.plates):
+            project.plate_index = self.plate
+        folder = _start_folder(scene, project, props.plate_folder(scene, project, props.active_plate(project)))
+        self.directory = folder + os.sep if folder else ""
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        if 0 <= self.plate < len(project.plates):
+            project.plate_index = self.plate
+        plate = props.active_plate(project)
+        if plate is None or not self.directory:
+            return {'CANCELLED'}
+        folder = os.path.normpath(self.directory)
+        top = props.project_stl_folder(scene, project)
+        if project.plate_paths and os.path.isdir(top) and build3mf._inside(folder, top):
+            roots = [top]  # the folder and the folders above it, up to the project's STL folder
+        else:
+            roots = [folder]  # the folder only
+        missing = missing_parts(scene, project, plate)
+        found = 0
+        for part in missing:
+            file_name = os.path.basename(part.path.replace("\\", "/")) or part.name
+            hit = build3mf.find_up(file_name, folder, roots) if file_name else None
+            if hit:
+                part.path = props.part_relative(scene, project, plate, hit)
+                found += 1
+        # The plate's name: the deepest folder its parts share, else the picked folder
+        props.name_plate_from_parts(scene, project, plate, fallback=folder)
+        left = len(missing) - found
+        self.report({'WARNING'} if left else {'INFO'},
+                    "Plate %s: %d of %d missing parts found%s" % (plate.name, found, len(missing),
+                                                                 "; %d still missing" % left if left else ""))
+        return {'FINISHED'}
+
+
+class ORCA_OT_overwrite(bpy.types.Operator):
+    bl_idname = "orca_reload.overwrite"
+    bl_label = "Overwrite"
+    bl_description = ("On: Build writes into the project's 3MF itself. Off: the 3MF is never changed once it exists; "
+                      "each Build writes the next numbered file into the 3mf_builds folder next to it")
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_project(context.scene.orca_reload) is not None
+
+    def invoke(self, context, event):
+        project = props.active_project(context.scene.orca_reload)
+        if project.overwrite:
+            return self.execute(context)
+        name = os.path.basename(props.project_path(context.scene, project))
+        return context.window_manager.invoke_confirm(
+            self, event, title="Overwrite %s?" % name,
+            message="From now on Build changes %s directly. No backup is kept." % name, confirm_text="Overwrite",
+            icon='WARNING')
+
+    def execute(self, context):
+        project = props.active_project(context.scene.orca_reload)
+        project.overwrite = not project.overwrite
         return {'FINISHED'}
 
 
@@ -241,10 +392,22 @@ class ORCA_OT_import_project(bpy.types.Operator):
     bl_idname = "orca_reload.import_project"
     bl_label = "Import Orca Project"
     bl_description = ("Add a project made from an Orca project (.3mf): its plates, and its parts with their STL "
-                      "files and how they stand on the plate. Build then updates that file")
+                      "files and how they stand on the plate. A 3MF that is already a project in the tab updates "
+                      "that project and keeps its links. Build then updates that file")
     bl_options = {'UNDO'}
     filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
     filter_glob: bpy.props.StringProperty(default="*.3mf;*.3MF", options={'HIDDEN'})
+    plate_paths: bpy.props.BoolProperty(
+        name="Plate names are folders", default=False,
+        description="Each plate's name is its folder below the STL folder set here (tight/cap_loose): a part Orca "
+                    "kept only the file name of is taken from that folder or a folder above it, up to the STL "
+                    "folder, when exactly one of them holds it")
+    stl_folder: bpy.props.StringProperty(
+        name="STL folder",
+        description="The project's STL folder, below the STL root (GripV/buttons). With Plate names are folders, "
+                    "plate names are read as paths below it, and looking up stops there. Empty: the STL root (the "
+                    "project's STL folder then becomes the folder all found parts share). A project already in the "
+                    "tab keeps its own")
 
     def invoke(self, context, event):
         root = props.project_root(context.scene)
@@ -254,16 +417,82 @@ class ORCA_OT_import_project(bpy.types.Operator):
 
     def execute(self, context):
         scene = context.scene
-        settings = scene.orca_reload
         path = os.path.normpath(self.filepath)
-        stl_root = props.stl_root(scene)
-        finder = reload3mf.SourceFinder([stl_root] if os.path.isdir(stl_root) else [])
-        try:
-            plates, problems = build3mf.read_layout(path, finder)
-        except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError) as e:
-            self.report({'ERROR'}, "%s: %s" % (os.path.basename(path), e))
-            return {'CANCELLED'}
+        old = next((p for p in scene.orca_reload.projects
+                    if os.path.normcase(props.project_path(scene, p)) == os.path.normcase(path)), None)
+        return import_3mf(self, context, path, old, self.plate_paths, self.stl_folder)
 
+
+class ORCA_OT_update_from_3mf(bpy.types.Operator):
+    bl_idname = "orca_reload.update_from_3mf"
+    bl_label = "Update from 3MF"
+    bl_description = ("Take what you changed in Orca back into this project: pick a 3MF (it starts at the newest "
+                      "build) and its plates, parts, where each copy stands, and the printer, plate and part "
+                      "settings replace the tab's. Links, seams and Build ticks are kept. The project's own 3MF "
+                      "path does not change")
+    bl_options = {'UNDO'}
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+    filter_glob: bpy.props.StringProperty(default="*.3mf;*.3MF", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_project(context.scene.orca_reload) is not None
+
+    def invoke(self, context, event):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        path = props.project_path(scene, project)
+        latest = build3mf.latest_build_path(path)
+        start = latest or path
+        if os.path.isfile(start):
+            self.filepath = start
+        else:
+            folder = os.path.dirname(start)
+            self.filepath = folder + os.sep if os.path.isdir(folder) else ""
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        project = props.active_project(context.scene.orca_reload)
+        if project is None:
+            return {'CANCELLED'}
+        return import_3mf(self, context, os.path.normpath(self.filepath), project, project.plate_paths, "")
+
+
+def import_3mf(operator, context, path, old, plate_paths, stl_folder):
+    """Imports the Orca 3MF at path: into the project old (keeping its links, seams and ticks), else as a new
+    project. Everything Build needs is saved in the tab, so the 3MF is not read again."""
+    scene = context.scene
+    settings = scene.orca_reload
+    stl_root = props.stl_root(scene)
+    finder = reload3mf.SourceFinder([stl_root] if os.path.isdir(stl_root) else [])
+    plate_paths = plate_paths or (old is not None and old.plate_paths)
+    if old is not None:
+        top = props.project_stl_folder(scene, old)
+    elif stl_folder:
+        top = paths.join(stl_root, stl_folder)
+    else:
+        top = None
+    links = _tab_links(scene, old) if old is not None else {}
+    try:
+        imported, problems = build3mf.read_project(
+            path, finder, plate_paths=plate_paths, top=top if top and os.path.isdir(top) else None,
+            known=lambda plate, name: links.get((plate, name.lower())))
+    except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError) as e:
+        operator.report({'ERROR'}, "%s: %s" % (os.path.basename(path), e))
+        return {'CANCELLED'}
+    plates = imported.plates
+
+    kept = {}  # (plate name, STL) -> what only the tab holds: Build ticks, gap, seams
+    if old is not None:
+        project = old
+        settings.project_index = list(settings.projects).index(old)
+        for plate in project.plates:
+            for part in plate.parts:
+                kept[(plate.name, os.path.normcase(props.part_path(scene, project, plate, part)))] = (
+                    plate.use, plate.gap, part.use, part.seam)
+        project.plates.clear()
+    else:
         project = settings.projects.add()
         settings.project_index = len(settings.projects) - 1
         project.name = os.path.basename(path)
@@ -271,36 +500,79 @@ class ORCA_OT_import_project(bpy.types.Operator):
         project.folder = paths.relative_form(os.path.dirname(path), root)  # ../other when outside the root
         if project.folder == ".":
             project.folder = ""
-        found = [p.stl for _, parts in plates for p in parts if p.stl]
-        rel = {p: props.relative_to(p, stl_root) for p in found}
-        project.stl_folder = build3mf.common_folder([r for r in rel.values() if not os.path.isabs(r)])
-        lines = ["Imported %s" % props.shown(scene, path)]
-        for name, parts in plates:
-            plate = project.plates.add()
-            plate.name = name
-            below = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in parts if p.stl]
-            plate.stl_folder = build3mf.common_folder([p for p in below if not os.path.isabs(p)])
-            for p in parts:
-                part = plate.parts.add()
-                part.name = p.name
-                if p.stl:
-                    part.path = props.part_relative(scene, project, plate, p.stl)
-                else:
-                    part.path = _source_path(scene, project, plate, p.source, os.path.dirname(path))
-                    problems.append("%s: %s not found below the STL root, %s" % (p.name, p.source, p.note))
-                part.up = p.up
-                part.angle = p.angle
-                part.copies = p.copies
-                part.mirror = p.mirror
-                if p.stl and p.note:
-                    lines.append("  %s: %s" % (p.name, p.note))
-        lines += ["  problem: %s" % p for p in problems]
-        _show_log(context, lines)
-        count = sum(len(parts) for _, parts in plates)
-        self.report({'WARNING'} if problems else {'INFO'},
-                    "Imported %d plates, %d parts%s" % (len(plates), count,
-                                                         "; check the Info panel" if problems else ""))
-        return {'FINISHED'}
+    project.plate_paths = plate_paths
+    if imported.profiles:
+        project.profiles = props.dump_json(imported.profiles)
+        project.orca_metadata = props.dump_json(imported.metadata)
+        project.profiles_from = props.shown(scene, path)
+    found = [p.stl for plate in plates for p in plate.parts if p.stl]
+    rel = {p: props.relative_to(p, stl_root) for p in found}
+    if old is None:
+        if stl_folder:
+            project.stl_folder = stl_folder.replace("\\", "/").strip("/")
+        elif plate_paths:
+            project.stl_folder = ""  # the plate names were read from the STL root
+        else:
+            project.stl_folder = build3mf.common_folder([r for r in rel.values() if not os.path.isabs(r)])
+    lines = ["%s %s" % ("Updated from" if old is not None else "Imported", props.shown(scene, path))]
+    if not imported.profiles:
+        lines.append("  no printer settings in it: Build takes them from Settings from")
+    for imported_plate in plates:
+        name = imported_plate.name
+        plate = project.plates.add()
+        plate.name = name
+        plate.orca_meta = props.dump_json(imported_plate.meta)
+        below = [build3mf.strip_folder(rel[p.stl], project.stl_folder) for p in imported_plate.parts if p.stl]
+        plate.stl_folder = build3mf.common_folder([p for p in below if not os.path.isabs(p)])
+        for p in imported_plate.parts:
+            part = plate.parts.add()
+            part.name = p.name
+            if p.stl:
+                part.path = props.part_relative(scene, project, plate, p.stl)
+                same = kept.get((name, os.path.normcase(p.stl)))
+                if same is not None:
+                    plate.use, plate.gap, part.use, part.seam = same
+            else:
+                part.path = _source_path(scene, project, plate, p.source, os.path.dirname(path))
+                problems.append("%s: %s not found below the STL root, %s" % (p.name, p.source, p.note))
+                props.set_mark(part, 'ERROR', p.note)
+            part.up = p.up
+            part.angle = p.angle
+            props.set_spots(part, p.spots or [None] * p.copies)
+            part.mirror = p.mirror
+            part.orca_object = props.dump_json(p.object_meta)
+            part.orca_part = props.dump_json(p.part_meta)
+            if p.stl and p.note:
+                lines.append("  %s: %s" % (p.name, p.note))
+    lines += ["  not kept: %s" % d for d in imported.dropped]
+    lines += ["  problem: %s" % p for p in problems]
+    _show_log(context, lines)
+    count = sum(len(p.parts) for p in plates)
+    operator.report({'WARNING'} if problems else {'INFO'},
+                    "%s %d plates, %d parts%s" % ("Updated" if old is not None else "Imported", len(plates), count,
+                                                   "; check the Info panel" if problems else ""))
+    return {'FINISHED'}
+
+
+def _tab_links(scene, project):
+    """{(plate name, file name in lower case): STL} of the project's parts whose STL is there, for the file names
+    found once on their plate; a plate name used twice gives nothing."""
+    names = [p.name for p in project.plates]
+    links = {}
+    for plate in project.plates:
+        if names.count(plate.name) != 1:
+            continue
+        by_name = {}
+        for part in plate.parts:
+            stl = props.part_path(scene, project, plate, part)
+            by_name.setdefault(os.path.basename(stl).lower(), []).append(stl)
+        for file_name, stls in by_name.items():
+            stls = {os.path.normcase(os.path.normpath(p)): p for p in stls}  # parts split from one STL: one link
+            if len(stls) == 1:
+                stl = next(iter(stls.values()))
+                if os.path.isfile(stl):
+                    links[(plate.name, file_name)] = stl
+    return links
 
 
 def _source_path(scene, project, plate, source, project_dir):
@@ -320,9 +592,10 @@ def project_spec(context, project, painted):
     problems = []
     lines = {}
     plates = []
-    for plate_no, plate in enumerate(p for p in project.plates if p.use):
+    used = [(i, p) for i, p in enumerate(project.plates) if p.use]
+    for plate_no, (plate_index, plate) in enumerate(used):
         parts = []
-        for part in plate.parts:
+        for part_index, part in enumerate(plate.parts):
             if not part.use:
                 continue
             if not part.path:
@@ -341,12 +614,29 @@ def project_spec(context, project, painted):
                     seam = _seam_function(line, settings, painted, who)
             stl = props.part_path(scene, project, plate, part)
             parts.append(build3mf.PartSpec(part.label(), stl, part.up, part.angle, part.copies, seam,
-                                           mirror=part.mirror, source=_source_file(scene, project, stl)))
-        plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts))
+                                           mirror=part.mirror, source=_source_file(scene, project, stl),
+                                           spots=props.spots(part), object_meta=props.pairs(part.orca_object),
+                                           part_meta=props.pairs(part.orca_part)))
+            parts[-1].where = (plate_index, part_index)  # to mark the tab's part after the build
+        plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts, meta=props.pairs(plate.orca_meta)))
     template = props.absolute(project.template)
     roots = props.roots(scene)
     return build3mf.ProjectSpec(props.project_path(scene, project), plates, template,
-                                shown=lambda p: paths.shown(p, *roots)), problems
+                                shown=lambda p: paths.shown(p, *roots),
+                                out_path=props.build_path(scene, project),
+                                profiles=props.load_json(project.profiles, {}),
+                                metadata=props.load_json(project.orca_metadata, {}),
+                                profiles_from="the import of " + project.profiles_from), problems
+
+
+def _record_spots(project, spec):
+    """Writes where each copy went into the tab's parts, so the next Build puts it there again."""
+    for plate in spec.plates:
+        for part_spec in plate.parts:
+            plate_index, part_index = getattr(part_spec, "where", (-1, -1))
+            if 0 <= plate_index < len(project.plates) and 0 <= part_index < len(project.plates[plate_index].parts):
+                if part_spec.spots_out:
+                    props.set_spots(project.plates[plate_index].parts[part_index], part_spec.spots_out)
 
 
 def _source_file(scene, project, stl):
@@ -492,28 +782,27 @@ def _build_steps(operator, context, projects):
     for project in projects:
         key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
         by_path.setdefault(key, []).append(project)
-    jobs = []  # (name, ProjectSpec or None, report lines when it cannot be built)
+    jobs = []  # (project, ProjectSpec or None, report lines when it cannot be built); the project only as a name
     for project in projects:
-        where = project.name
         key = os.path.normcase(os.path.abspath(props.project_path(scene, project)))
         if len(by_path[key]) > 1:
             others = ", ".join(sorted(p.name or os.path.basename(key) for p in by_path[key] if p is not project))
-            jobs.append((where, None, [props.shown(scene, props.project_path(scene, project)),
+            jobs.append((project.name, None, [props.shown(scene, props.project_path(scene, project)),
                                        "  problem: same 3MF file as %s" % others, "  not written"]))
             continue
         spec, problems = project_spec(context, project, painted)
         if problems:
-            jobs.append((where, None, [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] +
+            jobs.append((project.name, None, [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] +
                          ["  not written"]))
         else:
-            jobs.append((where, spec, []))
+            jobs.append((project.name, spec, []))
     total = sum(sum(len(plate.parts) for plate in spec.plates) + 1 for _, spec, _ in jobs if spec)
     part_total = sum(len(plate.parts) for _, spec, _ in jobs if spec for plate in spec.plates)
     project_total = sum(1 for _, spec, _ in jobs if spec)
     lines, written, done, stopped = [], 0, 0, True
     part_no = project_no = 0
     try:
-        for where, spec, problem_lines in jobs:
+        for _, spec, problem_lines in jobs:
             if spec is None:
                 lines += problem_lines + [""]
                 continue
@@ -534,6 +823,12 @@ def _build_steps(operator, context, projects):
                 text, ok = build3mf.build(spec, stl_cache)
             except (reload3mf.ReloadError, OSError, zipfile.BadZipFile, ET.ParseError, ValueError) as e:
                 text, ok = [spec.shown(spec.path), "  problem: %s" % e, "  not written"], False
+            # Looked up again: the tab may have changed while it built
+            now = [p for p in scene.orca_reload.projects
+                   if os.path.normcase(os.path.abspath(props.project_path(scene, p))) ==
+                   os.path.normcase(os.path.abspath(spec.path))]
+            if len(now) == 1 and ok:
+                _record_spots(now[0], spec)
             lines += text + [""]
             written += ok
             done += 1
@@ -570,5 +865,5 @@ class ORCA_OT_clear_log(bpy.types.Operator):
         return {'FINISHED'}
 
 
-classes = (ORCA_OT_list_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_browse_root, ORCA_OT_browse_template,
-           ORCA_OT_import_project, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)
+classes = (ORCA_OT_list_action, ORCA_OT_copy_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink, ORCA_OT_overwrite, ORCA_OT_browse_root, ORCA_OT_browse_template,
+           ORCA_OT_import_project, ORCA_OT_update_from_3mf, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)
