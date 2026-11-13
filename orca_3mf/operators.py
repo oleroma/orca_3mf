@@ -303,6 +303,7 @@ class ORCA_OT_relink(bpy.types.Operator):
     bl_options = {'UNDO', 'INTERNAL'}
     directory: bpy.props.StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
     filter_folder: bpy.props.BoolProperty(default=True, options={'HIDDEN'})
+    plate: bpy.props.IntProperty(default=-1, options={'HIDDEN', 'SKIP_SAVE'})  # from a plate row: that plate
 
     @classmethod
     def poll(cls, context):
@@ -311,6 +312,8 @@ class ORCA_OT_relink(bpy.types.Operator):
     def invoke(self, context, event):
         scene = context.scene
         project = props.active_project(scene.orca_reload)
+        if 0 <= self.plate < len(project.plates):
+            project.plate_index = self.plate
         folder = _start_folder(scene, project, props.plate_folder(scene, project, props.active_plate(project)))
         self.directory = folder + os.sep if folder else ""
         context.window_manager.fileselect_add(self)
@@ -319,6 +322,8 @@ class ORCA_OT_relink(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         project = props.active_project(scene.orca_reload)
+        if 0 <= self.plate < len(project.plates):
+            project.plate_index = self.plate
         plate = props.active_plate(project)
         if plate is None or not self.directory:
             return {'CANCELLED'}

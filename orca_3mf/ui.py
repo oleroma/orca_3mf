@@ -105,12 +105,16 @@ class ORCA_UL_plates(bpy.types.UIList):
         row.prop(item, "use", text="", icon=ICONS['CHECK_ON'] if item.use else ICONS['CHECK_OFF'], emboss=False)
         row.label(text="%d" % (index + 1))
         project = data
-        if project.plate_paths:  # the name is the plate's folder
-            name = row.row(align=True)
-            name.alert = not os.path.isdir(props.plate_folder(context.scene, project, item))
-            name.prop(item, "name", text="", emboss=False, icon='ERROR' if name.alert else ICONS['DIR'])
-        else:
-            row.prop(item, "name", text="", emboss=False)
+        scene = context.scene
+        no_folder = project.plate_paths and not os.path.isdir(props.plate_folder(scene, project, item))
+        name = row.row(align=True)
+        name.alert = no_folder
+        if no_folder or operators.missing_parts(scene, project, item):
+            # The warning is the plate's Relink button
+            name.operator("orca_reload.relink", text="", icon='ERROR', emboss=False).plate = index
+        elif project.plate_paths:  # the name is the plate's folder
+            name.label(text="", icon=ICONS['DIR'])
+        name.prop(item, "name", text="", emboss=False)
         tools = split.row(align=True)
         tools.label(text="", icon=ICONS['GAP'])
         tools.prop(item, "gap", text="", emboss=False)
