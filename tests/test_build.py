@@ -274,13 +274,13 @@ class BuildTest(unittest.TestCase):
         self.assertIsNone(notes["knob.stl"][0])  # in two of the plate's folders
         self.assertIn("in 2 of the plate's folders", notes["knob.stl"][1])
         self.assertIsNone(notes["lid.stl"][0])  # above the project's folder: never looked at
-        # Below the STL root itself there is no folder tight/cap_loose: nothing is taken
+        # Below the STL root itself there is no folder tight/cap_loose: only a file name found once is taken
         plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True)
-        self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])
+        self.assertEqual([p.stl for p in plates[0][1]], [None, None, stray])
         self.assertIn("there is no folder tight/cap_loose", plates[0][1][0].note)
-        # Without the switch, plate names are only names
+        # Without the switch, plate names are only names: a name found once below the project's folder is taken
         plates, _ = build3mf.read_layout(self.out, finder, top=os.path.join(root, "buttons"))
-        self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])
+        self.assertEqual([p.stl for p in plates[0][1]], [dpad, None, None])
 
     def test_reimport_keeps_the_tab_links(self):
         knob = self.write("knob", (5, 5, 5), (0, 0, 2.5), "somewhere/deep")
@@ -290,16 +290,22 @@ class BuildTest(unittest.TestCase):
                                          known=lambda plate, name: links.get((plate, name)))
         self.assertEqual(plates[0][1][0].stl, knob)
 
-    def test_a_file_name_alone_is_never_taken(self):
-        # Only one knob.stl below the root, but Orca kept just its name and the plate names no folder: not guessed
+    def test_a_unique_file_name_is_taken_and_a_repeated_one_never(self):
+        # Orca kept just the name and the plate names no folder: the only knob.stl below the root is a sure link
         knob = self.write("knob", (10, 10, 10), (0, 0, 5), "somewhere/deep")
         self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", knob)])]))
         self.replace_entry(reload3mf.MODEL_SETTINGS,
                            self.settings_xml().replace('value="%s"' % knob, 'value="knob.stl"'))
         plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
         part = plates[0][1][0]
+        self.assertEqual(part.stl, knob)
+        self.assertIn("the only knob.stl", part.note)
+        # A second knob.stl (another tolerance with the same name): neither is taken
+        self.write("knob", (10, 10, 10), (0, 0, 5), "elsewhere")
+        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        part = plates[0][1][0]
         self.assertIsNone(part.stl)
-        self.assertIn("Relink", part.note)
+        self.assertIn("2 files have it", part.note)
 
     def test_find_up_and_plate_name_for(self):
         root = os.path.join(self.dir, "stl")

@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 import bpy
 
-from . import blender_seams, build3mf, paths, props, reload3mf, seams
+from . import blender_seams, build3mf, combi, paths, props, reload3mf, seams
 
 REPORT_TEXT = "Orca build report"
 
@@ -249,6 +249,175 @@ class ORCA_OT_add_parts(bpy.types.Operator):
                 # A plate whose name isn't a folder yet takes the folder its parts share once all are found
                 props.name_plate_from_parts(context.scene, project, plate, whole=True)
         return {'FINISHED'}
+
+
+def _combi_preset(operator, scene, project):
+    """The project's Combi preset, or None after reporting why."""
+    if not combi.available(scene):
+        operator.report({'ERROR'}, "Combi Export is not installed")
+        return None
+    preset = combi.find_preset(scene, project.combi_preset)
+    if preset is None:
+        operator.report({'ERROR'}, "Pick the project's Combi preset first" if not project.combi_preset
+                        else "The project's Combi preset is gone: pick another")
+    return preset
+
+
+def fill_combi_files(scene, project, plate, found, items):
+    """Lists found ([(path, object)] from combi.files) in items (OrcaCombiFile), nothing ticked."""
+    on_plate = {os.path.normcase(os.path.normpath(props.part_path(scene, project, plate, p)))
+                for p in plate.parts if p.path}
+    top = props.project_stl_folder(scene, project) if project.stl_folder else props.stl_root(scene)
+    items.clear()
+    for path, obj in found:
+        item = items.add()
+        item.name = os.path.basename(path)
+        item.path = path
+        folder = paths.relative_form(os.path.dirname(path), top).replace("\\", "/")
+        item.shown = "" if folder == "." else folder
+        item.object = obj.name
+        item.on_plate = os.path.normcase(path) in on_plate
+        item.exists = os.path.isfile(path)
+
+
+class ORCA_OT_add_from_combi(bpy.types.Operator):
+    bl_idname = "orca_reload.add_from_combi"
+    bl_label = "Add from Combi"
+    bl_description = ("Add files the project's Combi preset writes to the active plate: tick them in the list. "
+                      "Combi tells which object each file comes from, so give every file its own name (a tag "
+                      "per tolerance) and Orca keeps enough to find it again")
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return props.active_plate(project) is not None and bool(project.combi_preset)
+
+    def invoke(self, context, event):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        plate = props.active_plate(project)
+        preset = _combi_preset(self, scene, project)
+        if preset is None:
+            return {'CANCELLED'}
+        found = combi.files(scene, preset)
+        if not found:
+            self.report({'WARNING'}, "Combi preset %s writes no files" % preset.name)
+            return {'CANCELLED'}
+        fill_combi_files(scene, project, plate, found, context.window_manager.orca_reload_combi_files)
+        context.window_manager.orca_reload_combi_index = 0
+        return context.window_manager.invoke_props_dialog(self, width=560, title="Add from Combi: " + preset.name,
+                                                          confirm_text="Add")
+
+    def draw(self, context):
+        wm = context.window_manager
+        layout = self.layout
+        layout.template_list("ORCA_UL_combi_files", "", wm, "orca_reload_combi_files", wm,
+                             "orca_reload_combi_index", rows=12)
+        picked = sum(1 for f in wm.orca_reload_combi_files if f.pick and not f.on_plate)
+        layout.label(text="%d file%s to add. Grey: on the plate already; red: not exported yet" % (
+            picked, "" if picked == 1 else "s"))
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        plate = props.active_plate(project)
+        items = context.window_manager.orca_reload_combi_files
+        picked = [f for f in items if f.pick and not f.on_plate]
+        if not picked:
+            return {'CANCELLED'}
+        if not any(p.parts for p in project.plates) and not project.stl_folder and not project.plate_paths:
+            # A project with no parts yet starts its STL folder at the folder the preset's files share
+            shared = combi.common_folder([f.path for f in items])
+            rel = props.relative_to(shared, props.stl_root(scene)) if shared else ""
+            if rel and not os.path.isabs(rel) and rel != "." and not rel.startswith(".."):
+                project.stl_folder = rel.replace("\\", "/")
+        for f in picked:
+            part = plate.parts.add()
+            part.path = props.part_relative(scene, project, plate, os.path.normpath(f.path))
+            part.name = f.name
+        plate.part_index = len(plate.parts) - 1
+        items.clear()
+        self.report({'INFO'}, "Added %d part%s" % (len(picked), "" if len(picked) == 1 else "s"))
+        return {'FINISHED'}
+
+
+class ORCA_OT_update_from_combi(bpy.types.Operator):
+    bl_idname = "orca_reload.update_from_combi"
+    bl_label = "Update from Combi"
+    bl_description = ("Check every part of the project against the files its Combi preset writes: a part whose "
+                      "file is gone is linked again when exactly one file of the preset has its name; parts Combi "
+                      "no longer writes, or has not exported yet, are marked. No plate or part is added or removed")
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return project is not None and bool(project.combi_preset)
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        preset = _combi_preset(self, scene, project)
+        if preset is None:
+            return {'CANCELLED'}
+        lines, counts = update_from_combi(scene, project, [p for p, _obj in combi.files(scene, preset)])
+        lines.insert(0, "Update from Combi preset %s: %s" % (preset.name, props.shown(
+            scene, props.project_path(scene, project))))
+        _show_log(context, lines)
+        self.report({'WARNING'} if counts["marked"] else {'INFO'},
+                    "%d parts checked, %d linked again, %d marked%s" % (
+                        counts["checked"], counts["linked"], counts["marked"],
+                        "; check the Info panel" if counts["marked"] else ""))
+        return {'FINISHED'}
+
+
+def update_from_combi(scene, project, files):
+    """Checks the project's parts against files (the absolute paths a Combi preset writes): (log lines, counts)."""
+    written = {os.path.normcase(os.path.normpath(p)): p for p in files}
+    by_name = {}
+    for p in written.values():
+        by_name.setdefault(os.path.basename(p).lower(), []).append(p)
+    lines = []
+    counts = {"checked": 0, "linked": 0, "marked": 0}
+    for plate_no, plate in enumerate(project.plates):
+        for part in plate.parts:
+            if not part.path:
+                continue
+            counts["checked"] += 1
+            path = props.part_path(scene, project, plate, part)
+            where = "plate %s, %s" % (plate.name or plate_no + 1, part.label())
+            if os.path.normcase(os.path.normpath(path)) in written:
+                if os.path.isfile(path):
+                    part.mark, part.mark_note = 'NONE', ""
+                else:
+                    note = "Combi writes this file but it is not exported yet: export in Combi first"
+                    part.mark, part.mark_note = 'WARNING', note
+                    counts["marked"] += 1
+                    lines.append("  %s: %s" % (where, note))
+                continue
+            same = by_name.get(os.path.basename(path).lower(), [])
+            if not os.path.isfile(path) and len(same) == 1:
+                part.path = props.part_relative(scene, project, plate, os.path.normpath(same[0]))
+                part.mark, part.mark_note = ('NONE', "") if os.path.isfile(same[0]) else (
+                    'WARNING', "Combi writes this file but it is not exported yet: export in Combi first")
+                counts["linked"] += 1
+                lines.append("  %s: linked to %s" % (where, props.shown(scene, same[0])))
+                continue
+            if os.path.isfile(path):
+                note = "Combi no longer writes this file; the one on disk is old"
+                part.mark, part.mark_note = 'WARNING', note
+            elif len(same) > 1:
+                note = "STL not found, and %d files of the Combi preset have its name: use Relink" % len(same)
+                part.mark, part.mark_note = 'ERROR', note
+            else:
+                note = "STL not found, and the Combi preset writes no file of that name"
+                part.mark, part.mark_note = 'ERROR', note
+            counts["marked"] += 1
+            lines.append("  %s: %s" % (where, note))
+    if not lines:
+        lines.append("  every part is a file Combi writes")
+    return lines, counts
 
 
 class ORCA_OT_browse_part(bpy.types.Operator):
@@ -790,6 +959,7 @@ def _build_steps(operator, context, projects):
             jobs.append((project.name, None, [props.shown(scene, props.project_path(scene, project)),
                                        "  problem: same 3MF file as %s" % others, "  not written"]))
             continue
+        props.name_untitled_plates(project)
         spec, problems = project_spec(context, project, painted)
         if problems:
             jobs.append((project.name, None, [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] +
@@ -865,5 +1035,7 @@ class ORCA_OT_clear_log(bpy.types.Operator):
         return {'FINISHED'}
 
 
-classes = (ORCA_OT_list_action, ORCA_OT_copy_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink, ORCA_OT_overwrite, ORCA_OT_browse_root, ORCA_OT_browse_template,
-           ORCA_OT_import_project, ORCA_OT_update_from_3mf, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)
+classes = (ORCA_OT_list_action, ORCA_OT_copy_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink,
+           ORCA_OT_overwrite, ORCA_OT_browse_root, ORCA_OT_browse_template, ORCA_OT_import_project,
+           ORCA_OT_update_from_3mf, ORCA_OT_add_from_combi, ORCA_OT_update_from_combi, ORCA_OT_build,
+           ORCA_OT_cancel_build, ORCA_OT_clear_log)

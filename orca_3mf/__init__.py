@@ -9,7 +9,7 @@ reads the seam lines, operators.py and ui.py make the tab. See README.md.
 """
 import sys
 
-_MODULES = ("seams", "reload3mf", "layout", "build3mf", "paths", "props", "blender_seams", "operators", "ui")
+_MODULES = ("seams", "reload3mf", "layout", "build3mf", "paths", "combi", "props", "blender_seams", "operators", "ui")
 
 if "bpy" in locals():
     # Reload Scripts runs this file again but keeps the submodules: reload them too, dependencies first

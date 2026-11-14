@@ -86,6 +86,16 @@ def list_action(level, action):
     assert bpy.ops.orca_reload.list_action(level=level, action=action) == {'FINISHED'}
 
 
+class _NullLayout:
+    """Takes any layout call (UIList rows drawn outside a window)."""
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: _NullLayout()
+
+    def __setattr__(self, name, value):
+        pass
+
+
 class OrcaTabTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -620,6 +630,89 @@ class OrcaTabTest(unittest.TestCase):
         self.add_project()
         self.add_part()
         self.assertIn("(new)", self.build())
+
+    def fake_combi(self, files):
+        """Stands in for Combi Export: a preset "Buttons" writing files [(folder below stl, file name, object)]."""
+        import contextlib
+        import types
+
+        class Preset(bpy.types.PropertyGroup):
+            uid: bpy.props.StringProperty()
+            name: bpy.props.StringProperty()
+
+        bpy.utils.register_class(Preset)
+        self.addCleanup(bpy.utils.unregister_class, Preset)
+        bpy.types.Scene.batch_stl_presets = bpy.props.CollectionProperty(type=Preset)
+        self.addCleanup(delattr, bpy.types.Scene, "batch_stl_presets")
+        preset = bpy.context.scene.batch_stl_presets.add()
+        preset.uid, preset.name = "u1", "Buttons"
+        root = os.path.join(self.dir, "stl")
+        self.combi_files = files
+        t = types.ModuleType("bl_ext.fake.combi_export.targets")
+        t.blend_dir = lambda: self.dir
+        t.root_dir = lambda scene: root
+        t.get_flat_overrides = lambda groups, level: []
+        t.cached_menu_items = contextlib.nullcontext
+        t.iter_export_objects = lambda scene, preset, ovrs: [(0, None, f, f[2], []) for f in self.combi_files]
+        t.group_by_signature = lambda objs: {"": ([], [(c, o, b) for _i, c, o, b, _v in objs])}
+        t.generate_named_combinations = lambda ovrs: [(None, {}, {})]
+        t.export_file_parts = lambda preset, c, o, b, tags, dirs: (o[0].split("/"), o[1])
+        t.export_dir = lambda root_, parts, base: os.path.join(root_, *parts)
+        sys.modules[t.__name__] = t
+        self.addCleanup(sys.modules.pop, t.__name__)
+        return preset
+
+    def test_add_and_update_from_combi(self):
+        from bl_ext.orca_test.orca_3mf import operators, ui
+        scene = bpy.context.scene
+        wm = bpy.context.window_manager
+        loose = os.path.join(self.dir, "stl", "GripV", "tol", "box_loose.stl")
+        os.makedirs(os.path.dirname(loose))
+        shutil.copy(self.stl, loose)
+        self.fake_combi([("GripV/parts", "box.stl", self.part), ("GripV/tol", "box_loose.stl", self.part),
+                         ("GripV/tol", "box_tight.stl", self.part)])  # box_tight not exported yet
+        project = self.add_project()
+        self.assertEqual(project.combi_preset_pick, 'NONE')
+        project.combi_preset_pick = "u1"
+        self.assertEqual(project.combi_preset, "u1")
+        bpy.context.scene.batch_stl_presets[0].name = "Renamed"  # the link is the preset's uid
+        self.assertEqual(project.combi_preset_pick, "u1")
+        plate = project.plates[0]
+        from bl_ext.orca_test.orca_3mf import combi
+        operators.fill_combi_files(scene, project, plate, combi.files(scene, combi.find_preset(scene, "u1")),
+                                   wm.orca_reload_combi_files)
+        files = {f.name: f for f in wm.orca_reload_combi_files}
+        self.assertEqual(sorted(files), ["box.stl", "box_loose.stl", "box_tight.stl"])
+        self.assertEqual((files["box_loose.stl"].shown, files["box_loose.stl"].object), ("tol", "box"))
+        self.assertFalse(files["box_tight.stl"].exists)
+        for f in wm.orca_reload_combi_files:
+            ui.ORCA_UL_combi_files.draw_item(None, bpy.context, _NullLayout(), wm, f, 0, None, "", 0)
+            f.pick = True
+        self.assertEqual(bpy.ops.orca_reload.add_from_combi('EXEC_DEFAULT'), {'FINISHED'})
+        self.assertEqual([p.path for p in plate.parts], ["parts/box.stl", "tol/box_loose.stl", "tol/box_tight.stl"])
+
+        # The STLs moved (Combi exports into another folder now): parts are linked again by their unique names
+        os.remove(loose)
+        moved = os.path.join(self.dir, "stl", "GripV", "tolerances", "box_loose.stl")
+        os.makedirs(os.path.dirname(moved))
+        shutil.copy(self.stl, moved)
+        self.combi_files[:] = [("GripV/parts", "box.stl", self.part), ("GripV/tolerances", "box_loose.stl", self.part)]
+        self.assertEqual(bpy.ops.orca_reload.update_from_combi(), {'FINISHED'})
+        marks = {p.name: (p.path, p.mark) for p in plate.parts}
+        self.assertEqual(marks["box.stl"], ("parts/box.stl", 'NONE'))
+        self.assertEqual(marks["box_loose.stl"], ("tolerances/box_loose.stl", 'NONE'))
+        self.assertEqual(marks["box_tight.stl"][1], 'ERROR')  # not found, and Combi no longer writes it
+        log = bpy.data.texts["Orca build report"].as_string()
+        self.assertIn("linked to", log)
+
+    def test_build_names_untitled_plates(self):
+        project = self.add_project(plates=2)
+        self.add_part()
+        project.plates[0].name = ""
+        project.plates[1].name = ""
+        project.plates[1].parts.add().path = "parts/box.stl"
+        self.build()
+        self.assertEqual([p.name for p in project.plates], ["Plate 1", "Plate 2"])
 
     def test_relative_roots_start_at_the_blend_file(self):
         from bl_ext.orca_test.orca_3mf import props

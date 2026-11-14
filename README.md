@@ -20,7 +20,7 @@ The setup is saved in the .blend file. The tab is laid out like Combi Export: th
 | --- | --- |
 | Orca Projects | **STL root**: where the parts' paths start. Empty: Combi Export's root. **3MF root**: where the projects are saved, `../orca_slicer` by default. Next to it, **Import** (make a project from an Orca file) and **Build** (every ticked project). **Seams**: the width of the painted seam strip and how far a seam line may be from the surface. |
 | Info | The log of the last build or import, and a short guide. |
-| Projects | One row per 3MF file: its Build button, tick, name and folder. Below the list, the active project's STL folder, **Settings from**, **Update from 3MF**, **Plate names are folders** and **Overwrite the 3MF**. |
+| Projects | One row per 3MF file: its Build button, tick, name and folder. Below the list, the active project's STL folder, **Settings from**, **Update from 3MF**, **Combi preset** with **Update from Combi** (when Combi Export is installed), **Plate names are folders** and **Overwrite the 3MF**. |
 | Plates | One row per Orca plate: tick, number, name, **gap** and STL folder. |
 | Parts | One row per part: tick, name (as Orca lists it), copies, seam mark and STL path. A red path means the STL is not there. Below the list, the active part's **Up**, **Turn**, **Mirror**, **Seam** and **Copies** (open it for each copy's X, Y and Turn). |
 
@@ -29,6 +29,17 @@ The roots can be absolute (`D:\Grip\stl`, `/home/olex/Grip/stl`) or relative to 
 A part's STL is found at STL root / project's STL folder / plate's STL folder / the part's path, with `/` between folders. So a project whose STL folder is `GripV/parts` and a plate whose STL folder is `buttons/default` take `cap_default/circle.stl` from `GripV/parts/buttons/default/cap_default/circle.stl`.
 
 The **+** of the Parts list opens a file browser: pick one or more STLs, each becomes a part (Shift + **+** adds an empty one). The folder button next to a part's path picks another file. Picked STLs are saved from the plate's STL folder, with `../` when they are outside it.
+
+## Parts from Combi Export
+
+Pick the project's **Combi preset** (renaming the preset in Combi keeps the link). Then:
+
+- **Add from Combi** (under the Parts list) lists every file the preset writes, as Combi itself says, with its folder and the Blender object it comes from. Tick the ones to put on the active plate. Files already on the plate are greyed out; red ones are not exported yet. A project with no parts yet takes the folder the preset's files share as its STL folder.
+- **Update from Combi** checks every part of the project against the preset's files. A part whose file is gone is linked again when exactly one file of the preset has its name. Parts Combi no longer writes (the file on disk is old), or has not exported yet, are marked yellow; parts with no file red. No plate or part is added or removed.
+
+Give every file its own name: let Combi add a tag per tolerance (`button_loose.stl`, `button_tight.stl`) rather than only a folder. Orca usually keeps only a part's file name, and Import and Update from 3MF take a file by its name only when exactly one file below the project's STL folder has it.
+
+Plates are yours to arrange: a main project can hold the default tolerance only, and fallback projects the others. Build names a plate without a name `Plate 3` (its number), so Update from 3MF can tell plates apart.
 
 ## Placing the parts
 
