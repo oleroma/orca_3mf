@@ -769,13 +769,13 @@ def plate_dir(top, name):
 
 
 def _find_source(part, finder, project_dir, plate_name, folders, top=None, known=None):
-    """(STL path or None, note). Only exact paths, never a file found by its name alone (one part exported with
-    several tolerances has the same file name in each folder), in this order:
+    """(STL path or None, note). Only sure links, in this order:
     1. the stored path (absolute, or from the 3MF's folder), when the file is there;
     2. known(file name): the link the tab already had for this part (a re-import), or None;
     3. plate_name read as a folder (only when given): that path below top (the project's STL folder; default the
        STL root), and the folders above it up to top. The file must be in exactly one of them;
-    4. the stored path's trailing folders below the STL root (at least one folder)."""
+    4. the stored path's trailing folders below the STL root (at least one folder);
+    5. the file name, when exactly one file has it below top (unique_name_hits). Two or more: red, never the first."""
     stored = part.source
     if stored:
         direct = stored if os.path.isabs(stored) else os.path.join(project_dir, stored)
@@ -804,11 +804,27 @@ def _find_source(part, finder, project_dir, plate_name, folders, top=None, known
     path, _ = finder.find(stored, project_dir, by_name=False)
     if path is not None:
         return path, ""
+    hits = unique_name_hits(file_name, finder, top)
+    if len(hits) == 1:
+        return hits[0], "the only %s in the project's STL folder" % file_name
     if "/" in stored.replace("\\", "/"):
         return None, "not found"
+    if len(hits) > 1:
+        return None, "Orca kept only the name %s, %d files have it in the project's STL folder%s: give each a " \
+                     "unique name (a tag in Combi) or use Relink" % (
+                         file_name, len(hits), ", and " + plate_note if plate_note else "")
     if plate_note:
         return None, "Orca kept only the name %s, and %s: use Relink" % (file_name, plate_note)
     return None, "Orca kept only the name %s: use Relink" % file_name
+
+
+def unique_name_hits(file_name, finder, top=None):
+    """The files named file_name (any case) below top (the project's STL folder), else below the STL root. Exactly
+    one is a sure link: Combi tags every variant (button_loose.stl, button_tight.stl), so a name says which file."""
+    hits = sorted(finder.name_hits(file_name))
+    if top:
+        hits = [h for h in hits if _inside(h, top)]
+    return hits
 
 
 def _inside(path, folder):

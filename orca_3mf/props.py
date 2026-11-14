@@ -6,7 +6,7 @@ import os
 
 import bpy
 
-from . import paths
+from . import combi, paths
 from .paths import relative_to  # noqa: F401  (used by the operators)
 
 DEFAULT_GAP = 5.0  # mm between parts on a plate
@@ -120,6 +120,45 @@ class OrcaPlate(bpy.types.PropertyGroup):
     part_index: bpy.props.IntProperty()
 
 
+_combi_items = []  # kept alive here: Blender keeps no copy of the strings an items callback returns
+
+
+def _combi_preset_items(self, context):
+    scene = context.scene if context is not None else bpy.context.scene
+    _combi_items[:] = [('NONE', "None", "Not linked to a Combi Export preset", 'BLANK1', 0)]
+    _combi_items.extend((key, name, "Combi Export preset " + name, 'PRESET', i + 1)
+                        for i, (key, name) in enumerate(combi.presets(scene)))
+    if self.combi_preset and not any(item[0] == self.combi_preset for item in _combi_items):
+        _combi_items.append((self.combi_preset, "missing preset", "This Combi Export preset is gone", 'ERROR',
+                             len(_combi_items)))
+    return _combi_items
+
+
+def _get_combi_preset_pick(self):
+    for key, _name, _tip, _icon, number in _combi_preset_items(self, None):
+        if key == self.combi_preset:
+            return number
+    return 0
+
+
+def _set_combi_preset_pick(self, value):
+    for key, _name, _tip, _icon, number in _combi_preset_items(self, None):
+        if number == value:
+            self.combi_preset = "" if key == 'NONE' else key
+            return
+
+
+class OrcaCombiFile(bpy.types.PropertyGroup):
+    """A file a Combi preset writes, in the Add from Combi window (WindowManager, not saved)."""
+    pick: bpy.props.BoolProperty(name="Add", description="Add this file to the plate")
+    name: bpy.props.StringProperty()  # file name
+    path: bpy.props.StringProperty()  # absolute
+    shown: bpy.props.StringProperty()  # its folder below Combi's root
+    object: bpy.props.StringProperty()  # the Blender object it is exported from
+    on_plate: bpy.props.BoolProperty()  # the plate already has it
+    exists: bpy.props.BoolProperty()  # written by an export already
+
+
 class OrcaProject(bpy.types.PropertyGroup):
     use: bpy.props.BoolProperty(name="Build", default=True, description="Build this project with Build all")
     name: bpy.props.StringProperty(name="Name", default="project", description="File name of the project, without .3mf")
@@ -153,6 +192,11 @@ class OrcaProject(bpy.types.PropertyGroup):
     profiles_from: bpy.props.StringProperty(
         name="Settings saved from", description="The 3MF the saved printer, process and filament settings came from")
     orca_metadata: bpy.props.StringProperty(options={'HIDDEN'})  # the Orca version that wrote them (JSON)
+    combi_preset: bpy.props.StringProperty(options={'HIDDEN'})  # the Combi Export preset's uid (combi.find_preset)
+    combi_preset_pick: bpy.props.EnumProperty(
+        name="Combi preset", items=_combi_preset_items, get=_get_combi_preset_pick, set=_set_combi_preset_pick,
+        description="The Combi Export preset this project's parts come from: Add from Combi lists its files and "
+                    "Update from Combi checks the parts against them. Renaming the preset keeps the link")
     plates: bpy.props.CollectionProperty(type=OrcaPlate)
     plate_index: bpy.props.IntProperty()
 
@@ -335,6 +379,27 @@ def name_plate_from_parts(scene, project, plate, fallback=None, whole=False):
     return False
 
 
+def name_untitled_plates(project):
+    """Plates without a name get one, Plate 3 for the third plate Build writes (the next free number when that name
+    is taken), so Update from 3MF can tell them apart. With "Plate names are folders" on, a name is a folder: left
+    alone."""
+    if project.plate_paths:
+        return
+    names = {p.name for p in project.plates}
+    number = 0
+    for plate in project.plates:
+        if not plate.use:
+            continue
+        number += 1
+        if plate.name.strip():
+            continue
+        n = number
+        while "Plate %d" % n in names:
+            n += 1
+        plate.name = "Plate %d" % n
+        names.add(plate.name)
+
+
 def plate_paths_changed(scene, project):
     """"Plate names are folders" was turned on or off: every part keeps its file. Turned on, each plate is named
     after the deepest folder its parts share, when they all sit in one line of folders below the project's STL
@@ -483,7 +548,7 @@ def from_dict(item, data):
                 pass
 
 
-classes = (OrcaCopy, OrcaPart, OrcaPlate, OrcaProject, OrcaLogLine, OrcaSettings)
+classes = (OrcaCopy, OrcaPart, OrcaPlate, OrcaCombiFile, OrcaProject, OrcaLogLine, OrcaSettings)
 
 
 BUILD_IDLE, BUILD_ALL = -2, -1  # building(): no build, Build all, else the project's index
@@ -518,10 +583,14 @@ def register_properties():
     # How far the build in progress is, and what it does now
     wm.orca_reload_progress = bpy.props.FloatProperty(name="Progress", default=0.0, min=0.0, max=1.0)
     wm.orca_reload_status = bpy.props.StringProperty(default="")
+    wm.orca_reload_combi_files = bpy.props.CollectionProperty(type=OrcaCombiFile)
+    wm.orca_reload_combi_index = bpy.props.IntProperty()
 
 
 def unregister_properties():
     wm = bpy.types.WindowManager
+    del wm.orca_reload_combi_index
+    del wm.orca_reload_combi_files
     del wm.orca_reload_status
     del wm.orca_reload_progress
     del wm.orca_reload_tips

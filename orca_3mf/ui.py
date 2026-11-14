@@ -5,7 +5,7 @@ import os
 
 import bpy
 
-from . import operators, props
+from . import combi, operators, props
 from .props import BUILD_ALL, BUILD_IDLE
 
 ICONS = {
@@ -166,6 +166,31 @@ class ORCA_UL_copies(bpy.types.UIList):
         row.prop(item, "turn", text="Turn", emboss=False)
 
 
+class ORCA_UL_combi_files(bpy.types.UIList):
+    """The files of a Combi preset in the Add from Combi window: tick, file name, its folder, its object."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        sub = row.row(align=True)
+        sub.enabled = not item.on_plate
+        sub.prop(item, "pick", text="")
+        sub.alert = not item.exists
+        sub.label(text=item.name, icon=ICONS['STL'])
+        folder = row.row()
+        folder.enabled = False
+        folder.label(text=item.shown or "-", icon=ICONS['DIR'])
+        folder.label(text=item.object, icon='OBJECT_DATA')
+
+    def filter_items(self, context, data, propname):
+        # The filter field matches the file name or its folder; sorted as Combi lists them (by path)
+        items = getattr(data, propname)
+        flags = [self.bitflag_filter_item] * len(items)
+        if self.filter_name:
+            needle = self.filter_name.lower()
+            flags = [self.bitflag_filter_item if needle in (i.shown + "/" + i.name).lower() else 0 for i in items]
+        return flags, []
+
+
 class ORCA_UL_log(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         layout.label(text=item.text, icon=item.icon or ICONS['BLANK'])
@@ -321,6 +346,13 @@ class VIEW3D_PT_orca_reload_projects(_OrcaPanel, bpy.types.Panel):
             draw_label_row(box, "").label(text="Saved from " + (project.profiles_from or "the import"))
         row = draw_label_row(box, "")
         row.operator("orca_reload.update_from_3mf", icon=ICONS['IMPORT'])
+        if combi.available(scene) or project.combi_preset:
+            row = draw_label_row(box, "Combi preset:")
+            row.alert = bool(project.combi_preset) and combi.find_preset(scene, project.combi_preset) is None
+            row.prop(project, "combi_preset_pick", text="")
+            row = draw_label_row(box, "")
+            row.enabled = bool(project.combi_preset)
+            row.operator("orca_reload.update_from_combi", icon='FILE_REFRESH')
         row = draw_label_row(box, "")
         row.prop(project, "plate_paths")
         row = draw_label_row(box, "")
@@ -375,6 +407,8 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         used = [p for p in plate.parts if p.use]
         draw_stats(col, [(len(plate.parts), 'PART'), (sum(p.copies for p in used), 'COPIES'),
                          (sum(1 for p in used if p.seam), 'SEAM')])
+        if project.combi_preset and combi.available(scene):
+            layout.operator("orca_reload.add_from_combi", icon=ICONS['ADD'])
         missing = len(operators.missing_parts(scene, project, plate))
         if missing:
             row = layout.row()
@@ -424,6 +458,7 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
 
 
 # Panels show in registration order
-classes = (ORCA_UL_projects, ORCA_UL_plates, ORCA_UL_parts, ORCA_UL_copies, ORCA_UL_log, VIEW3D_PT_orca_reload,
+classes = (ORCA_UL_projects, ORCA_UL_plates, ORCA_UL_parts, ORCA_UL_copies, ORCA_UL_combi_files,
+           ORCA_UL_log, VIEW3D_PT_orca_reload,
            VIEW3D_PT_orca_reload_info, VIEW3D_PT_orca_reload_projects, VIEW3D_PT_orca_reload_plates,
            VIEW3D_PT_orca_reload_parts)
