@@ -174,6 +174,96 @@ def read_profiles(z):
     return files, metadata
 
 
+def read_profiles_file(path):
+    """(profiles, metadata) of the 3MF at path: its printer, process and filament settings only (read_profiles).
+    Raises ReloadError when it holds none."""
+    with zipfile.ZipFile(path) as z:
+        files, metadata = read_profiles(z)
+    if SETTINGS not in files:
+        raise ReloadError("%s holds no printer, process and filament settings" % os.path.basename(path))
+    return files, metadata
+
+
+# Which kind an exported Orca preset is, by the key naming it in the project's settings, and the slot of
+# inherits_group (process, filament, printer) that names the preset it builds on
+PRESET_KINDS = (("print_settings_id", "process", 0), ("filament_settings_id", "filament", 1),
+                ("printer_settings_id", "printer", 2))
+PRESET_SKIP = {"name", "from", "inherits", "version", "setting_id", "instantiation", "filament_id", "type",
+               "is_custom_defined", "base_id", "user_id", "updated_time", "compatible_printers",
+               "compatible_printers_condition", "compatible_prints", "compatible_prints_condition"}
+
+
+def preset_kind(preset):
+    """("process" | "filament" | "printer", settings id key, inherits_group slot) of an exported preset."""
+    for key, kind, slot in PRESET_KINDS:
+        if key in preset:
+            return kind, key, slot
+    kind = preset.get("type")
+    for key, k, slot in PRESET_KINDS:
+        if kind == k or (kind == "machine" and k == "printer"):
+            return k, key, slot
+    raise ReloadError("not an Orca printer, process or filament preset")
+
+
+def apply_preset(profiles, preset, filament=0):
+    """Lays an exported Orca preset (a dict from its .json: only what it changes, plus the preset it builds on)
+    over the saved settings. A filament preset goes into filament slot `filament` (0 = the first). Returns
+    (new profiles, notes)."""
+    if SETTINGS not in profiles:
+        raise ReloadError("no settings to lay the preset over: load profiles from a 3MF first")
+    settings = json.loads(profiles[SETTINGS])
+    kind, id_key, group_slot = preset_kind(preset)
+    name = preset.get("name") or "preset"
+    notes = []
+    group = settings.get("inherits_group")
+    current_id = settings.get(id_key)
+    if isinstance(current_id, list):
+        current_id = current_id[filament] if filament < len(current_id) else ""
+    base = (group[group_slot] if isinstance(group, list) and group_slot < len(group) else "") or current_id
+    wanted = preset.get("inherits", "")
+    if wanted and base and wanted != base and current_id != wanted:
+        notes.append("%s builds on %s, but the loaded settings came from %s: settings it does not change are "
+                     "%s's" % (name, wanted, base, base))
+    changed = 0
+    for key, value in preset.items():
+        if key in PRESET_SKIP or key == id_key:
+            continue
+        old = settings.get(key)
+        if kind == "filament" and isinstance(old, list) and isinstance(value, list):
+            if filament >= len(old):
+                notes.append("%s: no filament %d in the settings" % (key, filament + 1))
+                continue
+            new = list(old)
+            new[filament] = value[0] if value else ""
+            value = new
+        if old != value:
+            changed += 1
+        settings[key] = value
+    if isinstance(settings.get(id_key), list):
+        ids = list(settings[id_key])
+        if filament < len(ids):
+            ids[filament] = name
+        settings[id_key] = ids
+    else:
+        settings[id_key] = name
+    if isinstance(group, list) and group_slot < len(group) and wanted:
+        group = list(group)
+        group[group_slot] = wanted
+        settings["inherits_group"] = group
+    out = dict(profiles)
+    out[SETTINGS] = json.dumps(settings, indent=4)
+    notes.insert(0, "%s preset %s: %d setting%s changed" % (kind, name, changed, "" if changed == 1 else "s"))
+    return out, notes
+
+
+def profile_keys(profiles):
+    """The setting names of the saved process and printer settings, sorted (for per-object settings)."""
+    try:
+        return sorted(json.loads(profiles.get(SETTINGS, "{}")))
+    except (ValueError, TypeError):
+        return []
+
+
 class Base:
     """The printer, process and filament settings a build writes: the ones Import saved, else a template
     project's, else none."""

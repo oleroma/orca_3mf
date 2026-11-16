@@ -344,6 +344,9 @@ class VIEW3D_PT_orca_reload_projects(_OrcaPanel, bpy.types.Panel):
         sub.alert = not project.profiles and not project.template
         if project.profiles:
             draw_label_row(box, "").label(text="Saved from " + (project.profiles_from or "the import"))
+        row = draw_label_row(box, "Profiles:")
+        row.operator("orca_reload.load_profiles", text="Load from 3MF", icon=ICONS['IMPORT'])
+        row.operator("orca_reload.apply_preset", text="Apply preset", icon='PRESET')
         row = draw_label_row(box, "")
         row.operator("orca_reload.update_from_3mf", icon=ICONS['IMPORT'])
         if combi.available(scene) or project.combi_preset:
@@ -450,6 +453,17 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         row.prop(setup, "mirror", text="")
         row = draw_label_row(box, "Seam:")
         row.prop(setup, "seam", text="")
+        row = draw_label_row(box, "Orca:")
+        op = row.operator("orca_reload.object_setting", text="Add setting", icon=ICONS['ADD'])
+        op.action = 'SET'
+        for key, value in props.pairs(setup.orca_object):
+            if key == "extruder":
+                continue
+            row = draw_label_row(box, "")
+            op = row.operator("orca_reload.object_setting", text="%s = %s" % (key, value), emboss=False)
+            op.action, op.key = 'SET', key
+            op = row.operator("orca_reload.object_setting", text="", icon='X', emboss=False)
+            op.action, op.key = 'REMOVE', key
 
         wm = context.window_manager
         header = box.row(align=True)

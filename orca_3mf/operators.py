@@ -215,6 +215,182 @@ class ORCA_OT_browse_template(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ORCA_OT_load_profiles(bpy.types.Operator):
+    bl_idname = "orca_reload.load_profiles"
+    bl_label = "Load Profiles"
+    bl_description = ("Take the printer, process and filament settings from an Orca project (.3mf) and save them "
+                      "in the .blend: its parts, plates and part settings are not read. Build then needs no 3MF. "
+                      "A small project with no parts, saved in Orca, works as a profile file")
+    bl_options = {'UNDO', 'INTERNAL'}
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+    filter_glob: bpy.props.StringProperty(default="*.3mf;*.3MF", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_project(context.scene.orca_reload) is not None
+
+    def invoke(self, context, event):
+        project = props.active_project(context.scene.orca_reload)
+        current = props.absolute(project.template) if project.template else ""
+        root = props.project_root(context.scene)
+        self.filepath = current if current and os.path.isfile(current) else (
+            root + os.sep if os.path.isdir(root) else "")
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        if project is None or not self.filepath:
+            return {'CANCELLED'}
+        path = os.path.normpath(self.filepath)
+        try:
+            profiles, metadata = build3mf.read_profiles_file(path)
+        except (reload3mf.ReloadError, OSError, zipfile.BadZipFile) as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        project.profiles = props.dump_json(profiles)
+        project.orca_metadata = props.dump_json(metadata)
+        project.profiles_from = props.shown(scene, path)
+        _show_log(context, ["Profiles loaded from %s" % props.shown(scene, path)] +
+                  ["  " + line for line in _profile_names(profiles)])
+        self.report({'INFO'}, "Profiles loaded from %s" % os.path.basename(path))
+        return {'FINISHED'}
+
+
+def _profile_names(profiles):
+    """Lines naming the printer, process and filament presets the saved settings come from."""
+    import json
+    try:
+        settings = json.loads(profiles.get(build3mf.SETTINGS, "{}"))
+    except ValueError:
+        return []
+    lines = []
+    for key, kind, _slot in build3mf.PRESET_KINDS:
+        value = settings.get(key)
+        if value:
+            lines.append("%s: %s" % (kind, ", ".join(v.strip() for v in value) if isinstance(value, list)
+                                     else value))
+    return lines
+
+
+class ORCA_OT_apply_preset(bpy.types.Operator):
+    bl_idname = "orca_reload.apply_preset"
+    bl_label = "Apply Preset File"
+    bl_description = ("Lay an Orca preset exported as .json (printer, process or filament) over the project's "
+                      "saved settings: only the values it holds change. Settings it does not change stay as "
+                      "the loaded ones")
+    bl_options = {'UNDO', 'INTERNAL'}
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+    filament: bpy.props.IntProperty(name="Filament", default=1, min=1, max=16,
+                                    description="Which filament of the project a filament preset goes into")
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return project is not None and bool(project.profiles)
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        import json
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        if project is None or not self.filepath:
+            return {'CANCELLED'}
+        path = os.path.normpath(self.filepath)
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                preset = json.load(f)
+            if not isinstance(preset, dict):
+                raise reload3mf.ReloadError("not an Orca preset")
+            profiles, notes = build3mf.apply_preset(props.load_json(project.profiles, {}), preset,
+                                                    self.filament - 1)
+        except (reload3mf.ReloadError, OSError, ValueError) as e:
+            self.report({'ERROR'}, "%s: %s" % (os.path.basename(path), e))
+            return {'CANCELLED'}
+        project.profiles = props.dump_json(profiles)
+        project.profiles_from = "%s + %s" % (project.profiles_from or "the import", os.path.basename(path))
+        _show_log(context, ["Preset %s applied" % props.shown(scene, path)] + ["  " + n for n in notes])
+        self.report({'WARNING'} if len(notes) > 1 else {'INFO'}, notes[0])
+        return {'FINISHED'}
+
+
+_key_cache = {"text": None, "keys": []}
+
+
+def _setting_keys(self, context, edit_text):
+    project = props.active_project(context.scene.orca_reload)
+    text = project.profiles if project is not None else ""
+    if _key_cache["text"] != text:
+        _key_cache["text"] = text
+        _key_cache["keys"] = build3mf.profile_keys(props.load_json(text, {}))
+    needle = edit_text.lower()
+    return [k for k in _key_cache["keys"] if needle in k][:200]
+
+
+class ORCA_OT_object_setting(bpy.types.Operator):
+    bl_idname = "orca_reload.object_setting"
+    bl_label = "Orca Setting"
+    bl_description = ("Set one of Orca's per-object settings (wall_loops, sparse_infill_density, ...) for this "
+                      "part: on its object's setup when it follows one, so every part of the object gets it")
+    bl_options = {'UNDO', 'INTERNAL'}
+    action: bpy.props.EnumProperty(items=(('SET', "Set", ""), ('REMOVE', "Remove", "")), options={'SKIP_SAVE'})
+    key: bpy.props.StringProperty(name="Setting", search=_setting_keys, options={'SKIP_SAVE'},
+                                  description="Orca's name of the setting, as in its preset files")
+    value: bpy.props.StringProperty(name="Value", options={'SKIP_SAVE'},
+                                    description="The value as Orca writes it: 3, 25%, 1 for on, 0 for off")
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_part(props.active_plate(props.active_project(context.scene.orca_reload))) is not None
+
+    def invoke(self, context, event):
+        if self.action == 'REMOVE':
+            return self.execute(context)
+        if self.key and not self.value:
+            part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+            self.value = dict(props.pairs(props.setup(part).orca_object)).get(self.key, "")
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        self.layout.prop(self, "key")
+        self.layout.prop(self, "value")
+        project = props.active_project(context.scene.orca_reload)
+        default = _profile_value(project, self.key)
+        if default is not None:
+            self.layout.label(text="The profile has %s" % default)
+
+    def execute(self, context):
+        part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+        key = self.key.strip()
+        if not key or key in build3mf.PART_KEYS:
+            return {'CANCELLED'}
+        setup = props.setup(part)
+        pairs = [(k, v) for k, v in props.pairs(setup.orca_object) if k != key]
+        if self.action == 'SET':
+            pairs.append((key, self.value.strip()))
+        setup.orca_object = props.dump_json(pairs)
+        return {'FINISHED'}
+
+
+def _profile_value(project, key):
+    """The value the project's saved process / printer settings give key, as text, or None."""
+    import json
+    if project is None or not key:
+        return None
+    try:
+        value = json.loads(props.load_json(project.profiles, {}).get(build3mf.SETTINGS, "{}")).get(key)
+    except ValueError:
+        return None
+    if value is None:
+        return None
+    return ", ".join(value) if isinstance(value, list) else str(value)
+
+
 class ORCA_OT_add_parts(bpy.types.Operator):
     bl_idname = "orca_reload.add_parts"
     bl_label = "Add STL Files"
@@ -1108,5 +1284,6 @@ class ORCA_OT_clear_log(bpy.types.Operator):
 
 classes = (ORCA_OT_list_action, ORCA_OT_copy_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink,
            ORCA_OT_overwrite, ORCA_OT_browse_root, ORCA_OT_browse_template, ORCA_OT_import_project,
-           ORCA_OT_update_from_3mf, ORCA_OT_add_from_combi, ORCA_OT_update_from_combi, ORCA_OT_own_setup, ORCA_OT_build,
+           ORCA_OT_update_from_3mf, ORCA_OT_add_from_combi, ORCA_OT_update_from_combi, ORCA_OT_own_setup,
+           ORCA_OT_load_profiles, ORCA_OT_apply_preset, ORCA_OT_object_setting, ORCA_OT_build,
            ORCA_OT_cancel_build, ORCA_OT_clear_log)

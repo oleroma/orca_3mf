@@ -757,6 +757,32 @@ class OrcaTabTest(unittest.TestCase):
         self.assertEqual((a.own, b.own, a.mark, b.mark), (True, True, 'WARNING', 'WARNING'))
         self.assertEqual((a.seam, b.seam), (seam, seam))
 
+    def test_profiles_from_a_3mf_a_preset_on_top_and_object_settings(self):
+        import json
+        project = self.add_project()
+        project.template = ""
+        self.assertEqual(bpy.ops.orca_reload.load_profiles(filepath=self.template), {'FINISHED'})
+        self.assertTrue(project.profiles)
+        preset = os.path.join(self.dir, "0.20mm tuned.json")
+        with open(preset, "w") as f:
+            json.dump({"name": "0.20mm tuned", "inherits": "0.20mm Standard @BBL A1",
+                       "print_settings_id": "0.20mm tuned", "layer_height": "0.1"}, f)
+        self.assertEqual(bpy.ops.orca_reload.apply_preset(filepath=preset), {'FINISHED'})
+        part = self.add_part()
+        self.assertEqual(bpy.ops.orca_reload.object_setting(action='SET', key="wall_loops", value="5"),
+                         {'FINISHED'})
+        self.assertEqual(bpy.ops.orca_reload.object_setting(action='SET', key="sparse_infill_density",
+                                                            value="25%"), {'FINISHED'})
+        self.assertEqual(bpy.ops.orca_reload.object_setting(action='REMOVE', key="wall_loops"), {'FINISHED'})
+        self.assertEqual(dict(json.loads(part.orca_object)), {"sparse_infill_density": "25%"})
+        self.build()
+        with zipfile.ZipFile(self.out()) as z:
+            settings = json.loads(z.read("Metadata/project_settings.config"))
+            model = z.read("Metadata/model_settings.config").decode()
+        self.assertEqual((settings["layer_height"], settings["print_settings_id"]), ("0.1", "0.20mm tuned"))
+        self.assertIn('key="sparse_infill_density" value="25%"', model)
+        self.assertNotIn("wall_loops", model)
+
     def test_build_names_untitled_plates(self):
         project = self.add_project(plates=2)
         self.add_part()

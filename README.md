@@ -43,6 +43,12 @@ Give every file its own name: let Combi add a tag per tolerance (`button_loose.s
 
 Plates are yours to arrange: a main project can hold the default tolerance only, and fallback projects the others. Build names a plate without a name `Plate 3` (its number), so Update from 3MF can tell plates apart.
 
+## Profiles and per-object settings
+
+- **Load from 3MF** (project box, Profiles row) takes only the printer, process and filament settings from an Orca project and saves them in the .blend; its parts and plates are not read. A small project with no parts, saved in Orca, works as a profile file. Import and Update from 3MF save them too.
+- **Apply preset** lays an Orca preset exported as `.json` (printer, process or filament) over the saved settings. Such a file holds only what you changed plus the built-in preset it builds on (`"inherits"`), so the rest stays as loaded; the log says when it builds on another preset than the loaded settings came from. A filament preset goes into the filament picked in the file window (1 by default).
+- **Orca settings of a part** (part box, Orca row): per-object settings like `wall_loops = 3` or `sparse_infill_density = 25%`, as Orca names them. **Add setting** offers the names of the saved profile and shows its value; click a setting to change it, X to remove it. On a part that follows its object, they are the object's, shared by all its parts. Update from 3MF still brings back what you set in Orca.
+
 ## Placing the parts
 
 - **Up**: the part's direction, in Blender as exported, that points up on the plate. `0, 0, 1` prints it as it stands in Blender, `0, 0, -1` upside down, `0, 1, 0` on its front face (Blender's front is −Y).

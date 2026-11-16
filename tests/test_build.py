@@ -117,6 +117,41 @@ class NestTest(unittest.TestCase):
         self.assertTrue(close(layout.plate_origin(5, 9, (256, 256)), (614.4, -307.2)))
 
 
+class PresetTest(unittest.TestCase):
+    def profiles(self):
+        return {build3mf.SETTINGS: json.dumps({
+            "print_settings_id": "0.16mm High Quality @BBL A1", "printer_settings_id": "Bambu Lab A1 0.4 nozzle",
+            "filament_settings_id": ["PLA", "PETG"], "inherits_group": ["", "PLA @System", "Bambu Lab A1 0.4 nozzle"],
+            "layer_height": "0.16", "wall_loops": "2", "nozzle_temperature": ["220", "240"]})}
+
+    def test_a_process_preset_changes_only_its_values_and_says_what_it_builds_on(self):
+        preset = {"name": "0.20mm tuned", "from": "User", "inherits": "0.20mm Standard @BBL A1",
+                  "print_settings_id": "0.20mm tuned",
+                  "layer_height": "0.1", "wall_loops": "2", "version": "2.0.0.53"}
+        profiles, notes = build3mf.apply_preset(self.profiles(), preset)
+        settings = json.loads(profiles[build3mf.SETTINGS])
+        self.assertEqual((settings["layer_height"], settings["wall_loops"]), ("0.1", "2"))
+        self.assertEqual(settings["print_settings_id"], "0.20mm tuned")
+        self.assertEqual(settings["inherits_group"][0], "0.20mm Standard @BBL A1")
+        self.assertNotIn("from", settings)
+        self.assertIn("1 setting changed", notes[0])
+        self.assertIn("builds on 0.20mm Standard @BBL A1", notes[1])
+
+    def test_a_filament_preset_goes_into_its_slot(self):
+        preset = {"name": "PETG tuned", "inherits": "PETG @System", "filament_settings_id": ["PETG tuned"],
+                  "nozzle_temperature": ["250"]}
+        profiles, _ = build3mf.apply_preset(self.profiles(), preset, filament=1)
+        settings = json.loads(profiles[build3mf.SETTINGS])
+        self.assertEqual(settings["nozzle_temperature"], ["220", "250"])
+        self.assertEqual(settings["filament_settings_id"], ["PLA", "PETG tuned"])
+
+    def test_without_loaded_settings_a_preset_is_refused(self):
+        with self.assertRaises(reload3mf.ReloadError):
+            build3mf.apply_preset({}, {"print_settings_id": "x"})
+        with self.assertRaises(reload3mf.ReloadError):
+            build3mf.apply_preset(self.profiles(), {"layer_height": "0.2"})  # no kind
+
+
 class BuildTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
