@@ -705,6 +705,58 @@ class OrcaTabTest(unittest.TestCase):
         log = bpy.data.texts["Orca build report"].as_string()
         self.assertIn("linked to", log)
 
+    def test_setup_lives_on_the_object(self):
+        from bl_ext.orca_test.orca_3mf import combi, operators, props
+        scene = bpy.context.scene
+        wm = bpy.context.window_manager
+        loose = os.path.join(self.dir, "stl", "GripV", "tol", "box_loose.stl")
+        os.makedirs(os.path.dirname(loose))
+        shutil.copy(self.stl, loose)
+        self.fake_combi([("GripV/parts", "box.stl", self.part), ("GripV/tol", "box_loose.stl", self.part)])
+        project = self.add_project()
+        project.combi_preset = "u1"
+        plate = project.plates[0]
+        operators.fill_combi_files(scene, project, plate, combi.files(scene, combi.find_preset(scene, "u1")),
+                                   wm.orca_reload_combi_files)
+        for f in wm.orca_reload_combi_files:
+            f.pick = True
+        self.assertEqual(bpy.ops.orca_reload.add_from_combi('EXEC_DEFAULT'), {'FINISHED'})
+        a, b = plate.parts
+        shared = self.part.orca_reload_setup
+        self.assertEqual((a.source, b.source, a.own, b.own, shared.has), (self.part, self.part, False, False, True))
+        self.assertEqual(props.sharing(scene, self.part), 2)
+        # Set once on the object: both parts follow
+        seam = curve_object("SeamTop", [(26, -40, 10), (30, -40, 10.2), (34, -40, 10)])
+        shared.seam = seam
+        shared.angle = math.radians(90)
+        self.assertEqual(props.setup(b).angle, shared.angle)
+        # Own setup: the part starts from the object's values, then goes its own way
+        plate.part_index = 0
+        self.assertEqual(bpy.ops.orca_reload.own_setup(), {'FINISHED'})
+        self.assertTrue(a.own)
+        self.assertEqual((a.seam, a.angle), (seam, shared.angle))
+        a.angle = 0.0
+        self.assertEqual(props.setup(b).angle, shared.angle)
+        self.assertEqual(self.build().count("seam on 2 triangles from SeamTop"), 2)  # the object's seam was built
+        # Update from 3MF: both linked parts agree -> the object's setup; they disagree -> each keeps its own
+        self.assertEqual(bpy.ops.orca_reload.own_setup(), {'FINISHED'})  # a follows the object again
+        self.build()
+        self.assertEqual(bpy.ops.orca_reload.update_from_3mf(filepath=self.out()), {'FINISHED'})
+        a, b = project.plates[0].parts
+        self.assertEqual((a.source, a.own, b.own), (self.part, False, False))
+        self.assertAlmostEqual(shared.angle, math.radians(90), places=4)
+        self.assertEqual(shared.seam, seam)
+        plate = project.plates[0]
+        plate.part_index = 0
+        bpy.ops.orca_reload.own_setup()
+        plate.parts[0].angle = 0.0
+        self.build()
+        plate.parts[0].own = False  # as if it followed the object while Orca had it turned
+        self.assertEqual(bpy.ops.orca_reload.update_from_3mf(filepath=self.out()), {'FINISHED'})
+        a, b = project.plates[0].parts
+        self.assertEqual((a.own, b.own, a.mark, b.mark), (True, True, 'WARNING', 'WARNING'))
+        self.assertEqual((a.seam, b.seam), (seam, seam))
+
     def test_build_names_untitled_plates(self):
         project = self.add_project(plates=2)
         self.add_part()

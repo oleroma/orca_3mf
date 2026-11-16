@@ -62,6 +62,30 @@ def _set_copies(self, value):
         self.instances.remove(len(self.instances) - 1)
 
 
+SETUP_KEYS = ("up", "angle", "mirror", "seam", "orca_object", "orca_part")  # what a part shares with its object
+
+
+class OrcaSetup(bpy.types.PropertyGroup):
+    """How the parts exported from a Blender object stand and print (Object.orca_reload_setup): every linked part
+    without "Own setup" uses it, on every plate of every project."""
+    has: bpy.props.BoolProperty(options={'HIDDEN'})  # set once a part was linked: the values below are in use
+    up: bpy.props.FloatVectorProperty(
+        name="Up", size=3, subtype='XYZ', default=(0.0, 0.0, 1.0),
+        description="The direction of the object (in Blender, as exported) that points up on the build plate, for "
+                    "every part exported from it")
+    angle: bpy.props.FloatProperty(
+        name="Turn", subtype='ANGLE', default=0.0, soft_min=-math.pi, soft_max=math.pi,
+        description="Turn around the up axis once the part stands on the plate")
+    mirror: bpy.props.BoolProperty(name="Mirror", default=False,
+                                   description="Mirror the parts across their own X axis before standing them up")
+    seam: bpy.props.PointerProperty(
+        name="Seam", type=bpy.types.Object, poll=_seam_poll,
+        description="Curve or mesh that marks the seam of every part exported from this object. It is snapped "
+                    "onto each part's surface, so one line serves every tolerance")
+    orca_object: bpy.props.StringProperty(options={'HIDDEN'})  # Orca object settings (JSON pairs)
+    orca_part: bpy.props.StringProperty(options={'HIDDEN'})  # Orca part settings (JSON pairs)
+
+
 class OrcaPart(bpy.types.PropertyGroup):
     use: bpy.props.BoolProperty(name="Build", default=True, description="Put this part on its plate")
     name: bpy.props.StringProperty(
@@ -96,6 +120,15 @@ class OrcaPart(bpy.types.PropertyGroup):
         name="Seam", type=bpy.types.Object, poll=_seam_poll,
         description="Curve or mesh that marks this part's seam: a curve's splines, the edges of a mesh made of edges "
                     "only, or the edges marked as seam of a mesh with faces. Draw it on the part's surface")
+    source: bpy.props.PointerProperty(
+        name="Object", type=bpy.types.Object,
+        description="The Blender object this part's STL is exported from (Combi Export says which). Up, Turn, "
+                    "Mirror, Seam and the Orca part settings are then the object's, shared by every part "
+                    "exported from it, unless Own setup is ticked")
+    own: bpy.props.BoolProperty(
+        name="Own setup", default=False,
+        description="This part keeps its own Up, Turn, Mirror, Seam and Orca part settings instead of its "
+                    "object's")
 
     def label(self):
         return self.name or os.path.basename(self.path.replace("\\", "/")) or "part"
@@ -379,6 +412,57 @@ def name_plate_from_parts(scene, project, plate, fallback=None, whole=False):
     return False
 
 
+def setup(part):
+    """Where the part's Up, Turn, Mirror, Seam and Orca part settings live: its object's setup when it is linked
+    to one and not set to Own setup, else the part itself (both have the SETUP_KEYS)."""
+    if part.source is not None and not part.own:
+        return part.source.orca_reload_setup
+    return part
+
+
+def _setup_values(item):
+    return {"up": tuple(round(v, 6) for v in item.up), "angle": round(item.angle, 6), "mirror": item.mirror,
+            "seam": item.seam, "orca_object": item.orca_object, "orca_part": item.orca_part}
+
+
+def copy_setup(source, target):
+    for key in SETUP_KEYS:
+        setattr(target, key, getattr(source, key))
+
+
+def link_part(part, obj, fresh=False):
+    """Links the part to obj, the Blender object its STL is exported from. An object without a setup yet takes the
+    part's values. A fresh part (just added) follows the object's setup; an existing part whose values differ
+    from it keeps them as its Own setup and is marked, so nothing it had is lost. Returns True when marked."""
+    part.source = obj
+    shared = obj.orca_reload_setup
+    if not shared.has:
+        copy_setup(part, shared)
+        shared.has = True
+        part.own = False
+        return False
+    if fresh or _setup_values(part) == _setup_values(shared):
+        part.own = False
+        return False
+    part.own = True
+    set_mark(part, 'WARNING', "set up differently from its object %s: kept as its own setup (untick Own setup "
+                              "to take the object's)" % obj.name)
+    return True
+
+
+def set_own_setup(part, own):
+    """Own setup ticked: the part starts from its object's values. Unticked: it follows the object again."""
+    if own and part.source is not None and not part.own:
+        copy_setup(part.source.orca_reload_setup, part)
+    part.own = own
+
+
+def sharing(scene, obj):
+    """How many parts of the scene's projects follow obj's setup."""
+    return sum(1 for project in scene.orca_reload.projects for plate in project.plates for part in plate.parts
+               if part.source == obj and not part.own)
+
+
 def name_untitled_plates(project):
     """Plates without a name get one, Plate 3 for the third plate Build writes (the next free number when that name
     is taken), so Update from 3MF can tell them apart. With "Plate names are folders" on, a name is a folder: left
@@ -548,7 +632,7 @@ def from_dict(item, data):
                 pass
 
 
-classes = (OrcaCopy, OrcaPart, OrcaPlate, OrcaCombiFile, OrcaProject, OrcaLogLine, OrcaSettings)
+classes = (OrcaCopy, OrcaSetup, OrcaPart, OrcaPlate, OrcaCombiFile, OrcaProject, OrcaLogLine, OrcaSettings)
 
 
 BUILD_IDLE, BUILD_ALL = -2, -1  # building(): no build, Build all, else the project's index
@@ -574,6 +658,7 @@ def cancel_requested():
 
 def register_properties():
     bpy.types.Scene.orca_reload = bpy.props.PointerProperty(type=OrcaSettings)
+    bpy.types.Object.orca_reload_setup = bpy.props.PointerProperty(type=OrcaSetup)
     wm = bpy.types.WindowManager
     wm.orca_reload_log = bpy.props.CollectionProperty(type=OrcaLogLine)
     wm.orca_reload_log_index = bpy.props.IntProperty()
@@ -598,3 +683,4 @@ def unregister_properties():
     del wm.orca_reload_log_index
     del wm.orca_reload_log
     del bpy.types.Scene.orca_reload
+    del bpy.types.Object.orca_reload_setup

@@ -143,7 +143,7 @@ class ORCA_UL_parts(bpy.types.UIList):
         copies.ui_units_x = COPIES_UNITS
         copies.alignment = 'RIGHT'
         copies.label(text="x%d" % item.copies if item.copies > 1 else "")
-        tools.label(text="", icon=ICONS['SEAM'] if item.seam else ICONS['BLANK'])
+        tools.label(text="", icon=ICONS['SEAM'] if props.setup(item).seam else ICONS['BLANK'])
         level, _ = props.part_mark(context.scene, project, plate, item)
         path = tools.row(align=True)
         path.alert = level == 'ERROR'
@@ -406,7 +406,7 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         draw_list_controls(row, 'PART')
         used = [p for p in plate.parts if p.use]
         draw_stats(col, [(len(plate.parts), 'PART'), (sum(p.copies for p in used), 'COPIES'),
-                         (sum(1 for p in used if p.seam), 'SEAM')])
+                         (sum(1 for p in used if props.setup(p).seam), 'SEAM')])
         if project.combi_preset and combi.available(scene):
             layout.operator("orca_reload.add_from_combi", icon=ICONS['ADD'])
         missing = len(operators.missing_parts(scene, project, plate))
@@ -432,14 +432,24 @@ class VIEW3D_PT_orca_reload_parts(_OrcaPanel, bpy.types.Panel):
         row = draw_label_row(box, "STL:")
         row.prop(part, "path", text="")
         row.operator("orca_reload.browse_part", text="", icon=ICONS['DIR'])
+        setup = props.setup(part)
+        if part.source is not None:
+            row = draw_label_row(box, "Object:")
+            row.label(text=part.source.name, icon='OBJECT_DATA')
+            row.operator("orca_reload.own_setup", text="Own setup",
+                         icon='CHECKBOX_HLT' if part.own else 'CHECKBOX_DEHLT', emboss=False)
+            if not part.own:
+                shared = props.sharing(scene, part.source)
+                draw_label_row(box, "").label(text="Setup of %s, shared by %d part%s" % (
+                    part.source.name, shared, "" if shared == 1 else "s"))
         row = draw_label_row(box, "Up:")
-        row.prop(part, "up", text="")
+        row.prop(setup, "up", text="")
         row = draw_label_row(box, "Turn:")
-        row.prop(part, "angle", text="")
+        row.prop(setup, "angle", text="")
         row = draw_label_row(box, "Mirror:")
-        row.prop(part, "mirror", text="")
+        row.prop(setup, "mirror", text="")
         row = draw_label_row(box, "Seam:")
-        row.prop(part, "seam", text="")
+        row.prop(setup, "seam", text="")
 
         wm = context.window_manager
         header = box.row(align=True)
