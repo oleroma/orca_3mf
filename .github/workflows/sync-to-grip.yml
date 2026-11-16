@@ -1,11 +1,12 @@
 name: Sync to Grip
 
-# On every push to master that touches the add-on, copy it into oleroma/Grip/extensions/orca_3mf.
+# On every push to main that touches the add-on, copy it into oleroma/Grip/extensions/orca_3mf.
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "orca_3mf/**"
+      - ".github/workflows/sync-to-grip.yml"
   workflow_dispatch:
 
 concurrency:
