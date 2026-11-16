@@ -174,6 +174,96 @@ def read_profiles(z):
     return files, metadata
 
 
+def read_profiles_file(path):
+    """(profiles, metadata) of the 3MF at path: its printer, process and filament settings only (read_profiles).
+    Raises ReloadError when it holds none."""
+    with zipfile.ZipFile(path) as z:
+        files, metadata = read_profiles(z)
+    if SETTINGS not in files:
+        raise ReloadError("%s holds no printer, process and filament settings" % os.path.basename(path))
+    return files, metadata
+
+
+# Which kind an exported Orca preset is, by the key naming it in the project's settings, and the slot of
+# inherits_group (process, filament, printer) that names the preset it builds on
+PRESET_KINDS = (("print_settings_id", "process", 0), ("filament_settings_id", "filament", 1),
+                ("printer_settings_id", "printer", 2))
+PRESET_SKIP = {"name", "from", "inherits", "version", "setting_id", "instantiation", "filament_id", "type",
+               "is_custom_defined", "base_id", "user_id", "updated_time", "compatible_printers",
+               "compatible_printers_condition", "compatible_prints", "compatible_prints_condition"}
+
+
+def preset_kind(preset):
+    """("process" | "filament" | "printer", settings id key, inherits_group slot) of an exported preset."""
+    for key, kind, slot in PRESET_KINDS:
+        if key in preset:
+            return kind, key, slot
+    kind = preset.get("type")
+    for key, k, slot in PRESET_KINDS:
+        if kind == k or (kind == "machine" and k == "printer"):
+            return k, key, slot
+    raise ReloadError("not an Orca printer, process or filament preset")
+
+
+def apply_preset(profiles, preset, filament=0):
+    """Lays an exported Orca preset (a dict from its .json: only what it changes, plus the preset it builds on)
+    over the saved settings. A filament preset goes into filament slot `filament` (0 = the first). Returns
+    (new profiles, notes)."""
+    if SETTINGS not in profiles:
+        raise ReloadError("no settings to lay the preset over: load profiles from a 3MF first")
+    settings = json.loads(profiles[SETTINGS])
+    kind, id_key, group_slot = preset_kind(preset)
+    name = preset.get("name") or "preset"
+    notes = []
+    group = settings.get("inherits_group")
+    current_id = settings.get(id_key)
+    if isinstance(current_id, list):
+        current_id = current_id[filament] if filament < len(current_id) else ""
+    base = (group[group_slot] if isinstance(group, list) and group_slot < len(group) else "") or current_id
+    wanted = preset.get("inherits", "")
+    if wanted and base and wanted != base and current_id != wanted:
+        notes.append("%s builds on %s, but the loaded settings came from %s: settings it does not change are "
+                     "%s's" % (name, wanted, base, base))
+    changed = 0
+    for key, value in preset.items():
+        if key in PRESET_SKIP or key == id_key:
+            continue
+        old = settings.get(key)
+        if kind == "filament" and isinstance(old, list) and isinstance(value, list):
+            if filament >= len(old):
+                notes.append("%s: no filament %d in the settings" % (key, filament + 1))
+                continue
+            new = list(old)
+            new[filament] = value[0] if value else ""
+            value = new
+        if old != value:
+            changed += 1
+        settings[key] = value
+    if isinstance(settings.get(id_key), list):
+        ids = list(settings[id_key])
+        if filament < len(ids):
+            ids[filament] = name
+        settings[id_key] = ids
+    else:
+        settings[id_key] = name
+    if isinstance(group, list) and group_slot < len(group) and wanted:
+        group = list(group)
+        group[group_slot] = wanted
+        settings["inherits_group"] = group
+    out = dict(profiles)
+    out[SETTINGS] = json.dumps(settings, indent=4)
+    notes.insert(0, "%s preset %s: %d setting%s changed" % (kind, name, changed, "" if changed == 1 else "s"))
+    return out, notes
+
+
+def profile_keys(profiles):
+    """The setting names of the saved process and printer settings, sorted (for per-object settings)."""
+    try:
+        return sorted(json.loads(profiles.get(SETTINGS, "{}")))
+    except (ValueError, TypeError):
+        return []
+
+
 class Base:
     """The printer, process and filament settings a build writes: the ones Import saved, else a template
     project's, else none."""
@@ -769,13 +859,13 @@ def plate_dir(top, name):
 
 
 def _find_source(part, finder, project_dir, plate_name, folders, top=None, known=None):
-    """(STL path or None, note). Only exact paths, never a file found by its name alone (one part exported with
-    several tolerances has the same file name in each folder), in this order:
+    """(STL path or None, note). Only sure links, in this order:
     1. the stored path (absolute, or from the 3MF's folder), when the file is there;
     2. known(file name): the link the tab already had for this part (a re-import), or None;
     3. plate_name read as a folder (only when given): that path below top (the project's STL folder; default the
        STL root), and the folders above it up to top. The file must be in exactly one of them;
-    4. the stored path's trailing folders below the STL root (at least one folder)."""
+    4. the stored path's trailing folders below the STL root (at least one folder);
+    5. the file name, when exactly one file has it below top (unique_name_hits). Two or more: red, never the first."""
     stored = part.source
     if stored:
         direct = stored if os.path.isabs(stored) else os.path.join(project_dir, stored)
@@ -804,11 +894,27 @@ def _find_source(part, finder, project_dir, plate_name, folders, top=None, known
     path, _ = finder.find(stored, project_dir, by_name=False)
     if path is not None:
         return path, ""
+    hits = unique_name_hits(file_name, finder, top)
+    if len(hits) == 1:
+        return hits[0], "the only %s in the project's STL folder" % file_name
     if "/" in stored.replace("\\", "/"):
         return None, "not found"
+    if len(hits) > 1:
+        return None, "Orca kept only the name %s, %d files have it in the project's STL folder%s: give each a " \
+                     "unique name (a tag in Combi) or use Relink" % (
+                         file_name, len(hits), ", and " + plate_note if plate_note else "")
     if plate_note:
         return None, "Orca kept only the name %s, and %s: use Relink" % (file_name, plate_note)
     return None, "Orca kept only the name %s: use Relink" % file_name
+
+
+def unique_name_hits(file_name, finder, top=None):
+    """The files named file_name (any case) below top (the project's STL folder), else below the STL root. Exactly
+    one is a sure link: Combi tags every variant (button_loose.stl, button_tight.stl), so a name says which file."""
+    hits = sorted(finder.name_hits(file_name))
+    if top:
+        hits = [h for h in hits if _inside(h, top)]
+    return hits
 
 
 def _inside(path, folder):

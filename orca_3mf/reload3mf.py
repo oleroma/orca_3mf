@@ -368,6 +368,10 @@ class SourceFinder:
                         self._names.setdefault(f.lower(), set()).add(os.path.join(dirpath, f))
         return self._names
 
+    def name_hits(self, file_name):
+        """Every file named file_name (any case) below the search folders."""
+        return set(self._name_index().get(file_name.lower(), ()))
+
     def find(self, stored, project_dir, by_name=True):
         """Returns (path or None, problem or None). by_name=False takes only paths: the stored path, or its trailing
         pieces with at least one folder (".../parts/R4.stl"), never a file found by its name alone."""

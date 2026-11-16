@@ -117,6 +117,41 @@ class NestTest(unittest.TestCase):
         self.assertTrue(close(layout.plate_origin(5, 9, (256, 256)), (614.4, -307.2)))
 
 
+class PresetTest(unittest.TestCase):
+    def profiles(self):
+        return {build3mf.SETTINGS: json.dumps({
+            "print_settings_id": "0.16mm High Quality @BBL A1", "printer_settings_id": "Bambu Lab A1 0.4 nozzle",
+            "filament_settings_id": ["PLA", "PETG"], "inherits_group": ["", "PLA @System", "Bambu Lab A1 0.4 nozzle"],
+            "layer_height": "0.16", "wall_loops": "2", "nozzle_temperature": ["220", "240"]})}
+
+    def test_a_process_preset_changes_only_its_values_and_says_what_it_builds_on(self):
+        preset = {"name": "0.20mm tuned", "from": "User", "inherits": "0.20mm Standard @BBL A1",
+                  "print_settings_id": "0.20mm tuned",
+                  "layer_height": "0.1", "wall_loops": "2", "version": "2.0.0.53"}
+        profiles, notes = build3mf.apply_preset(self.profiles(), preset)
+        settings = json.loads(profiles[build3mf.SETTINGS])
+        self.assertEqual((settings["layer_height"], settings["wall_loops"]), ("0.1", "2"))
+        self.assertEqual(settings["print_settings_id"], "0.20mm tuned")
+        self.assertEqual(settings["inherits_group"][0], "0.20mm Standard @BBL A1")
+        self.assertNotIn("from", settings)
+        self.assertIn("1 setting changed", notes[0])
+        self.assertIn("builds on 0.20mm Standard @BBL A1", notes[1])
+
+    def test_a_filament_preset_goes_into_its_slot(self):
+        preset = {"name": "PETG tuned", "inherits": "PETG @System", "filament_settings_id": ["PETG tuned"],
+                  "nozzle_temperature": ["250"]}
+        profiles, _ = build3mf.apply_preset(self.profiles(), preset, filament=1)
+        settings = json.loads(profiles[build3mf.SETTINGS])
+        self.assertEqual(settings["nozzle_temperature"], ["220", "250"])
+        self.assertEqual(settings["filament_settings_id"], ["PLA", "PETG tuned"])
+
+    def test_without_loaded_settings_a_preset_is_refused(self):
+        with self.assertRaises(reload3mf.ReloadError):
+            build3mf.apply_preset({}, {"print_settings_id": "x"})
+        with self.assertRaises(reload3mf.ReloadError):
+            build3mf.apply_preset(self.profiles(), {"layer_height": "0.2"})  # no kind
+
+
 class BuildTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -274,13 +309,13 @@ class BuildTest(unittest.TestCase):
         self.assertIsNone(notes["knob.stl"][0])  # in two of the plate's folders
         self.assertIn("in 2 of the plate's folders", notes["knob.stl"][1])
         self.assertIsNone(notes["lid.stl"][0])  # above the project's folder: never looked at
-        # Below the STL root itself there is no folder tight/cap_loose: nothing is taken
+        # Below the STL root itself there is no folder tight/cap_loose: only a file name found once is taken
         plates, _ = build3mf.read_layout(self.out, finder, plate_paths=True)
-        self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])
+        self.assertEqual([p.stl for p in plates[0][1]], [None, None, stray])
         self.assertIn("there is no folder tight/cap_loose", plates[0][1][0].note)
-        # Without the switch, plate names are only names
+        # Without the switch, plate names are only names: a name found once below the project's folder is taken
         plates, _ = build3mf.read_layout(self.out, finder, top=os.path.join(root, "buttons"))
-        self.assertEqual([p.stl for p in plates[0][1]], [None, None, None])
+        self.assertEqual([p.stl for p in plates[0][1]], [dpad, None, None])
 
     def test_reimport_keeps_the_tab_links(self):
         knob = self.write("knob", (5, 5, 5), (0, 0, 2.5), "somewhere/deep")
@@ -290,16 +325,22 @@ class BuildTest(unittest.TestCase):
                                          known=lambda plate, name: links.get((plate, name)))
         self.assertEqual(plates[0][1][0].stl, knob)
 
-    def test_a_file_name_alone_is_never_taken(self):
-        # Only one knob.stl below the root, but Orca kept just its name and the plate names no folder: not guessed
+    def test_a_unique_file_name_is_taken_and_a_repeated_one_never(self):
+        # Orca kept just the name and the plate names no folder: the only knob.stl below the root is a sure link
         knob = self.write("knob", (10, 10, 10), (0, 0, 5), "somewhere/deep")
         self.build(self.spec([build3mf.PlateSpec("p", 5, [build3mf.PartSpec("knob.stl", knob)])]))
         self.replace_entry(reload3mf.MODEL_SETTINGS,
                            self.settings_xml().replace('value="%s"' % knob, 'value="knob.stl"'))
         plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
         part = plates[0][1][0]
+        self.assertEqual(part.stl, knob)
+        self.assertIn("the only knob.stl", part.note)
+        # A second knob.stl (another tolerance with the same name): neither is taken
+        self.write("knob", (10, 10, 10), (0, 0, 5), "elsewhere")
+        plates, _ = build3mf.read_layout(self.out, reload3mf.SourceFinder([self.dir]))
+        part = plates[0][1][0]
         self.assertIsNone(part.stl)
-        self.assertIn("Relink", part.note)
+        self.assertIn("2 files have it", part.note)
 
     def test_find_up_and_plate_name_for(self):
         root = os.path.join(self.dir, "stl")

@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 import bpy
 
-from . import blender_seams, build3mf, paths, props, reload3mf, seams
+from . import blender_seams, build3mf, combi, paths, props, reload3mf, seams
 
 REPORT_TEXT = "Orca build report"
 
@@ -215,6 +215,182 @@ class ORCA_OT_browse_template(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ORCA_OT_load_profiles(bpy.types.Operator):
+    bl_idname = "orca_reload.load_profiles"
+    bl_label = "Load Profiles"
+    bl_description = ("Take the printer, process and filament settings from an Orca project (.3mf) and save them "
+                      "in the .blend: its parts, plates and part settings are not read. Build then needs no 3MF. "
+                      "A small project with no parts, saved in Orca, works as a profile file")
+    bl_options = {'UNDO', 'INTERNAL'}
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+    filter_glob: bpy.props.StringProperty(default="*.3mf;*.3MF", options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_project(context.scene.orca_reload) is not None
+
+    def invoke(self, context, event):
+        project = props.active_project(context.scene.orca_reload)
+        current = props.absolute(project.template) if project.template else ""
+        root = props.project_root(context.scene)
+        self.filepath = current if current and os.path.isfile(current) else (
+            root + os.sep if os.path.isdir(root) else "")
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        if project is None or not self.filepath:
+            return {'CANCELLED'}
+        path = os.path.normpath(self.filepath)
+        try:
+            profiles, metadata = build3mf.read_profiles_file(path)
+        except (reload3mf.ReloadError, OSError, zipfile.BadZipFile) as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        project.profiles = props.dump_json(profiles)
+        project.orca_metadata = props.dump_json(metadata)
+        project.profiles_from = props.shown(scene, path)
+        _show_log(context, ["Profiles loaded from %s" % props.shown(scene, path)] +
+                  ["  " + line for line in _profile_names(profiles)])
+        self.report({'INFO'}, "Profiles loaded from %s" % os.path.basename(path))
+        return {'FINISHED'}
+
+
+def _profile_names(profiles):
+    """Lines naming the printer, process and filament presets the saved settings come from."""
+    import json
+    try:
+        settings = json.loads(profiles.get(build3mf.SETTINGS, "{}"))
+    except ValueError:
+        return []
+    lines = []
+    for key, kind, _slot in build3mf.PRESET_KINDS:
+        value = settings.get(key)
+        if value:
+            lines.append("%s: %s" % (kind, ", ".join(v.strip() for v in value) if isinstance(value, list)
+                                     else value))
+    return lines
+
+
+class ORCA_OT_apply_preset(bpy.types.Operator):
+    bl_idname = "orca_reload.apply_preset"
+    bl_label = "Apply Preset File"
+    bl_description = ("Lay an Orca preset exported as .json (printer, process or filament) over the project's "
+                      "saved settings: only the values it holds change. Settings it does not change stay as "
+                      "the loaded ones")
+    bl_options = {'UNDO', 'INTERNAL'}
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+    filament: bpy.props.IntProperty(name="Filament", default=1, min=1, max=16,
+                                    description="Which filament of the project a filament preset goes into")
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return project is not None and bool(project.profiles)
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        import json
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        if project is None or not self.filepath:
+            return {'CANCELLED'}
+        path = os.path.normpath(self.filepath)
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                preset = json.load(f)
+            if not isinstance(preset, dict):
+                raise reload3mf.ReloadError("not an Orca preset")
+            profiles, notes = build3mf.apply_preset(props.load_json(project.profiles, {}), preset,
+                                                    self.filament - 1)
+        except (reload3mf.ReloadError, OSError, ValueError) as e:
+            self.report({'ERROR'}, "%s: %s" % (os.path.basename(path), e))
+            return {'CANCELLED'}
+        project.profiles = props.dump_json(profiles)
+        project.profiles_from = "%s + %s" % (project.profiles_from or "the import", os.path.basename(path))
+        _show_log(context, ["Preset %s applied" % props.shown(scene, path)] + ["  " + n for n in notes])
+        self.report({'WARNING'} if len(notes) > 1 else {'INFO'}, notes[0])
+        return {'FINISHED'}
+
+
+_key_cache = {"text": None, "keys": []}
+
+
+def _setting_keys(self, context, edit_text):
+    project = props.active_project(context.scene.orca_reload)
+    text = project.profiles if project is not None else ""
+    if _key_cache["text"] != text:
+        _key_cache["text"] = text
+        _key_cache["keys"] = build3mf.profile_keys(props.load_json(text, {}))
+    needle = edit_text.lower()
+    return [k for k in _key_cache["keys"] if needle in k][:200]
+
+
+class ORCA_OT_object_setting(bpy.types.Operator):
+    bl_idname = "orca_reload.object_setting"
+    bl_label = "Orca Setting"
+    bl_description = ("Set one of Orca's per-object settings (wall_loops, sparse_infill_density, ...) for this "
+                      "part: on its object's setup when it follows one, so every part of the object gets it")
+    bl_options = {'UNDO', 'INTERNAL'}
+    action: bpy.props.EnumProperty(items=(('SET', "Set", ""), ('REMOVE', "Remove", "")), options={'SKIP_SAVE'})
+    key: bpy.props.StringProperty(name="Setting", search=_setting_keys, options={'SKIP_SAVE'},
+                                  description="Orca's name of the setting, as in its preset files")
+    value: bpy.props.StringProperty(name="Value", options={'SKIP_SAVE'},
+                                    description="The value as Orca writes it: 3, 25%, 1 for on, 0 for off")
+
+    @classmethod
+    def poll(cls, context):
+        return props.active_part(props.active_plate(props.active_project(context.scene.orca_reload))) is not None
+
+    def invoke(self, context, event):
+        if self.action == 'REMOVE':
+            return self.execute(context)
+        if self.key and not self.value:
+            part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+            self.value = dict(props.pairs(props.setup(part).orca_object)).get(self.key, "")
+        return context.window_manager.invoke_props_dialog(self, width=400)
+
+    def draw(self, context):
+        self.layout.prop(self, "key")
+        self.layout.prop(self, "value")
+        project = props.active_project(context.scene.orca_reload)
+        default = _profile_value(project, self.key)
+        if default is not None:
+            self.layout.label(text="The profile has %s" % default)
+
+    def execute(self, context):
+        part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+        key = self.key.strip()
+        if not key or key in build3mf.PART_KEYS:
+            return {'CANCELLED'}
+        setup = props.setup(part)
+        pairs = [(k, v) for k, v in props.pairs(setup.orca_object) if k != key]
+        if self.action == 'SET':
+            pairs.append((key, self.value.strip()))
+        setup.orca_object = props.dump_json(pairs)
+        return {'FINISHED'}
+
+
+def _profile_value(project, key):
+    """The value the project's saved process / printer settings give key, as text, or None."""
+    import json
+    if project is None or not key:
+        return None
+    try:
+        value = json.loads(props.load_json(project.profiles, {}).get(build3mf.SETTINGS, "{}")).get(key)
+    except ValueError:
+        return None
+    if value is None:
+        return None
+    return ", ".join(value) if isinstance(value, list) else str(value)
+
+
 class ORCA_OT_add_parts(bpy.types.Operator):
     bl_idname = "orca_reload.add_parts"
     bl_label = "Add STL Files"
@@ -249,6 +425,215 @@ class ORCA_OT_add_parts(bpy.types.Operator):
                 # A plate whose name isn't a folder yet takes the folder its parts share once all are found
                 props.name_plate_from_parts(context.scene, project, plate, whole=True)
         return {'FINISHED'}
+
+
+def _combi_preset(operator, scene, project):
+    """The project's Combi preset, or None after reporting why."""
+    if not combi.available(scene):
+        operator.report({'ERROR'}, "Combi Export is not installed")
+        return None
+    preset = combi.find_preset(scene, project.combi_preset)
+    if preset is None:
+        operator.report({'ERROR'}, "Pick the project's Combi preset first" if not project.combi_preset
+                        else "The project's Combi preset is gone: pick another")
+    return preset
+
+
+class ORCA_OT_own_setup(bpy.types.Operator):
+    bl_idname = "orca_reload.own_setup"
+    bl_label = "Own Setup"
+    bl_description = ("Ticked: this part keeps its own Up, Turn, Mirror, Seam and Orca part settings, starting "
+                      "from its object's. Unticked: it follows its object's setup again")
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+        return part is not None and part.source is not None
+
+    def execute(self, context):
+        part = props.active_part(props.active_plate(props.active_project(context.scene.orca_reload)))
+        props.set_own_setup(part, not part.own)
+        if not part.own and part.mark_note.startswith("set up differently"):
+            part.mark, part.mark_note = 'NONE', ""
+        return {'FINISHED'}
+
+
+def fill_combi_files(scene, project, plate, found, items):
+    """Lists found ([(path, object)] from combi.files) in items (OrcaCombiFile), nothing ticked."""
+    on_plate = {os.path.normcase(os.path.normpath(props.part_path(scene, project, plate, p)))
+                for p in plate.parts if p.path}
+    top = props.project_stl_folder(scene, project) if project.stl_folder else props.stl_root(scene)
+    items.clear()
+    for path, obj in found:
+        item = items.add()
+        item.name = os.path.basename(path)
+        item.path = path
+        folder = paths.relative_form(os.path.dirname(path), top).replace("\\", "/")
+        item.shown = "" if folder == "." else folder
+        item.object = obj.name
+        item.on_plate = os.path.normcase(path) in on_plate
+        item.exists = os.path.isfile(path)
+
+
+class ORCA_OT_add_from_combi(bpy.types.Operator):
+    bl_idname = "orca_reload.add_from_combi"
+    bl_label = "Add from Combi"
+    bl_description = ("Add files the project's Combi preset writes to the active plate: tick them in the list. "
+                      "Combi tells which object each file comes from, so give every file its own name (a tag "
+                      "per tolerance) and Orca keeps enough to find it again")
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return props.active_plate(project) is not None and bool(project.combi_preset)
+
+    def invoke(self, context, event):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        plate = props.active_plate(project)
+        preset = _combi_preset(self, scene, project)
+        if preset is None:
+            return {'CANCELLED'}
+        found = combi.files(scene, preset)
+        if not found:
+            self.report({'WARNING'}, "Combi preset %s writes no files" % preset.name)
+            return {'CANCELLED'}
+        fill_combi_files(scene, project, plate, found, context.window_manager.orca_reload_combi_files)
+        context.window_manager.orca_reload_combi_index = 0
+        return context.window_manager.invoke_props_dialog(self, width=560, title="Add from Combi: " + preset.name,
+                                                          confirm_text="Add")
+
+    def draw(self, context):
+        wm = context.window_manager
+        layout = self.layout
+        layout.template_list("ORCA_UL_combi_files", "", wm, "orca_reload_combi_files", wm,
+                             "orca_reload_combi_index", rows=12)
+        picked = sum(1 for f in wm.orca_reload_combi_files if f.pick and not f.on_plate)
+        layout.label(text="%d file%s to add. Grey: on the plate already; red: not exported yet" % (
+            picked, "" if picked == 1 else "s"))
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        plate = props.active_plate(project)
+        items = context.window_manager.orca_reload_combi_files
+        picked = [f for f in items if f.pick and not f.on_plate]
+        if not picked:
+            return {'CANCELLED'}
+        if not any(p.parts for p in project.plates) and not project.stl_folder and not project.plate_paths:
+            # A project with no parts yet starts its STL folder at the folder the preset's files share
+            shared = combi.common_folder([f.path for f in items])
+            rel = props.relative_to(shared, props.stl_root(scene)) if shared else ""
+            if rel and not os.path.isabs(rel) and rel != "." and not rel.startswith(".."):
+                project.stl_folder = rel.replace("\\", "/")
+        for f in picked:
+            part = plate.parts.add()
+            part.path = props.part_relative(scene, project, plate, os.path.normpath(f.path))
+            part.name = f.name
+            obj = bpy.data.objects.get(f.object)
+            if obj is not None:
+                props.link_part(part, obj, fresh=True)
+        plate.part_index = len(plate.parts) - 1
+        items.clear()
+        self.report({'INFO'}, "Added %d part%s" % (len(picked), "" if len(picked) == 1 else "s"))
+        return {'FINISHED'}
+
+
+class ORCA_OT_update_from_combi(bpy.types.Operator):
+    bl_idname = "orca_reload.update_from_combi"
+    bl_label = "Update from Combi"
+    bl_description = ("Check every part of the project against the files its Combi preset writes: a part whose "
+                      "file is gone is linked again when exactly one file of the preset has its name; parts Combi "
+                      "no longer writes, or has not exported yet, are marked. No plate or part is added or removed")
+    bl_options = {'UNDO', 'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        project = props.active_project(context.scene.orca_reload)
+        return project is not None and bool(project.combi_preset)
+
+    def execute(self, context):
+        scene = context.scene
+        project = props.active_project(scene.orca_reload)
+        preset = _combi_preset(self, scene, project)
+        if preset is None:
+            return {'CANCELLED'}
+        lines, counts = update_from_combi(scene, project, combi.files(scene, preset))
+        lines.insert(0, "Update from Combi preset %s: %s" % (preset.name, props.shown(
+            scene, props.project_path(scene, project))))
+        _show_log(context, lines)
+        self.report({'WARNING'} if counts["marked"] else {'INFO'},
+                    "%d parts checked, %d linked again, %d marked%s" % (
+                        counts["checked"], counts["linked"], counts["marked"],
+                        "; check the Info panel" if counts["marked"] else ""))
+        return {'FINISHED'}
+
+
+def update_from_combi(scene, project, files):
+    """Checks the project's parts against files ([(absolute path, Blender object)] a Combi preset writes) and links
+    each part to the object its file comes from: (log lines, counts)."""
+    objects = {os.path.normcase(os.path.normpath(p)): obj for p, obj in files}
+    files = [p for p, _obj in files]
+    written = {os.path.normcase(os.path.normpath(p)): p for p in files}
+    by_name = {}
+    for p in written.values():
+        by_name.setdefault(os.path.basename(p).lower(), []).append(p)
+    lines = []
+    counts = {"checked": 0, "linked": 0, "marked": 0}
+    for plate_no, plate in enumerate(project.plates):
+        for part in plate.parts:
+            if not part.path:
+                continue
+            counts["checked"] += 1
+            path = props.part_path(scene, project, plate, part)
+            where = "plate %s, %s" % (plate.name or plate_no + 1, part.label())
+            key = os.path.normcase(os.path.normpath(path))
+            if key in written:
+                if os.path.isfile(path):
+                    part.mark, part.mark_note = 'NONE', ""
+                else:
+                    note = "Combi writes this file but it is not exported yet: export in Combi first"
+                    part.mark, part.mark_note = 'WARNING', note
+                    counts["marked"] += 1
+                    lines.append("  %s: %s" % (where, note))
+                _link(part, objects[key], where, lines, counts)
+                continue
+            same = by_name.get(os.path.basename(path).lower(), [])
+            if not os.path.isfile(path) and len(same) == 1:
+                part.path = props.part_relative(scene, project, plate, os.path.normpath(same[0]))
+                part.mark, part.mark_note = ('NONE', "") if os.path.isfile(same[0]) else (
+                    'WARNING', "Combi writes this file but it is not exported yet: export in Combi first")
+                counts["linked"] += 1
+                lines.append("  %s: linked to %s" % (where, props.shown(scene, same[0])))
+                _link(part, objects[os.path.normcase(os.path.normpath(same[0]))], where, lines, counts)
+                continue
+            if os.path.isfile(path):
+                note = "Combi no longer writes this file; the one on disk is old"
+                part.mark, part.mark_note = 'WARNING', note
+            elif len(same) > 1:
+                note = "STL not found, and %d files of the Combi preset have its name: use Relink" % len(same)
+                part.mark, part.mark_note = 'ERROR', note
+            else:
+                note = "STL not found, and the Combi preset writes no file of that name"
+                part.mark, part.mark_note = 'ERROR', note
+            counts["marked"] += 1
+            lines.append("  %s: %s" % (where, note))
+    if not lines:
+        lines.append("  every part is a file Combi writes")
+    return lines, counts
+
+
+def _link(part, obj, where, lines, counts):
+    """Links a part to the object Combi exports its file from, once (a part already linked to it is left as is)."""
+    if obj is None or part.source == obj:
+        return
+    if props.link_part(part, obj):
+        counts["marked"] += 1
+        lines.append("  %s: %s" % (where, part.mark_note))
+    else:
+        lines.append("  %s: follows the setup of object %s" % (where, obj.name))
 
 
 class ORCA_OT_browse_part(bpy.types.Operator):
@@ -489,8 +874,8 @@ def import_3mf(operator, context, path, old, plate_paths, stl_folder):
         settings.project_index = list(settings.projects).index(old)
         for plate in project.plates:
             for part in plate.parts:
-                kept[(plate.name, os.path.normcase(props.part_path(scene, project, plate, part)))] = (
-                    plate.use, plate.gap, part.use, part.seam)
+                kept[(plate.name, os.path.normcase(os.path.normpath(props.part_path(scene, project, plate, part))))] = (
+                    plate.use, plate.gap, part.use, part.seam, part.source, part.own)
         project.plates.clear()
     else:
         project = settings.projects.add()
@@ -529,9 +914,9 @@ def import_3mf(operator, context, path, old, plate_paths, stl_folder):
             part.name = p.name
             if p.stl:
                 part.path = props.part_relative(scene, project, plate, p.stl)
-                same = kept.get((name, os.path.normcase(p.stl)))
+                same = kept.get((name, os.path.normcase(os.path.normpath(p.stl))))
                 if same is not None:
-                    plate.use, plate.gap, part.use, part.seam = same
+                    plate.use, plate.gap, part.use, part.seam, part.source, part.own = same
             else:
                 part.path = _source_path(scene, project, plate, p.source, os.path.dirname(path))
                 problems.append("%s: %s not found below the STL root, %s" % (p.name, p.source, p.note))
@@ -544,6 +929,7 @@ def import_3mf(operator, context, path, old, plate_paths, stl_folder):
             part.orca_part = props.dump_json(p.part_meta)
             if p.stl and p.note:
                 lines.append("  %s: %s" % (p.name, p.note))
+    lines += _settings_to_objects(project)
     lines += ["  not kept: %s" % d for d in imported.dropped]
     lines += ["  problem: %s" % p for p in problems]
     _show_log(context, lines)
@@ -552,6 +938,35 @@ def import_3mf(operator, context, path, old, plate_paths, stl_folder):
                     "%s %d plates, %d parts%s" % ("Updated" if old is not None else "Imported", len(plates), count,
                                                    "; check the Info panel" if problems else ""))
     return {'FINISHED'}
+
+
+def _settings_to_objects(project):
+    """After Update from 3MF: the parts that follow an object's setup came back with what Orca has. When all of an
+    object's parts in the project agree, that becomes the object's setup (its seam stays); otherwise those parts
+    keep what they came back with as their Own setup, marked. Returns log lines."""
+    groups = {}
+    for plate in project.plates:
+        for part in plate.parts:
+            if part.source is not None and not part.own:
+                groups.setdefault(part.source.name, (part.source, []))[1].append(part)
+    lines = []
+    for obj, parts in groups.values():
+        shared = obj.orca_reload_setup
+        values = {(tuple(round(v, 4) for v in p.up), round(p.angle, 4), p.mirror, p.orca_object, p.orca_part)
+                  for p in parts}
+        if len(values) == 1:
+            for key in ("up", "angle", "mirror", "orca_object", "orca_part"):
+                setattr(shared, key, getattr(parts[0], key))
+            shared.has = True
+            continue
+        for p in parts:
+            p.seam = shared.seam
+            p.own = True
+            props.set_mark(p, 'WARNING', "came back from Orca set up differently from the other parts of object "
+                                         "%s: kept as its own setup" % obj.name)
+        lines.append("  object %s: its %d parts came back set up differently, each kept as its own setup"
+                     % (obj.name, len(parts)))
+    return lines
 
 
 def _tab_links(scene, project):
@@ -602,21 +1017,22 @@ def project_spec(context, project, painted):
                 problems.append("plate %d, %s: no STL file" % (plate_no + 1, part.label()))
                 continue
             seam = None
-            if part.seam is not None:
-                who = part.seam.as_pointer()
+            setup = props.setup(part)  # the object's setup, or the part's own
+            if setup.seam is not None:
+                who = setup.seam.as_pointer()
                 if who not in lines:
-                    lines[who] = blender_seams.seam_line(part.seam, context)
+                    lines[who] = blender_seams.seam_line(setup.seam, context)
                 line, problem = lines[who]
                 if problem:
-                    problems.append("plate %d, %s: seam %s %s" % (plate_no + 1, part.label(), part.seam.name,
+                    problems.append("plate %d, %s: seam %s %s" % (plate_no + 1, part.label(), setup.seam.name,
                                                                   problem))
                 else:
                     seam = _seam_function(line, settings, painted, who)
             stl = props.part_path(scene, project, plate, part)
-            parts.append(build3mf.PartSpec(part.label(), stl, part.up, part.angle, part.copies, seam,
-                                           mirror=part.mirror, source=_source_file(scene, project, stl),
-                                           spots=props.spots(part), object_meta=props.pairs(part.orca_object),
-                                           part_meta=props.pairs(part.orca_part)))
+            parts.append(build3mf.PartSpec(part.label(), stl, setup.up, setup.angle, part.copies, seam,
+                                           mirror=setup.mirror, source=_source_file(scene, project, stl),
+                                           spots=props.spots(part), object_meta=props.pairs(setup.orca_object),
+                                           part_meta=props.pairs(setup.orca_part)))
             parts[-1].where = (plate_index, part_index)  # to mark the tab's part after the build
         plates.append(build3mf.PlateSpec(plate.name, plate.gap, parts, meta=props.pairs(plate.orca_meta)))
     template = props.absolute(project.template)
@@ -790,6 +1206,7 @@ def _build_steps(operator, context, projects):
             jobs.append((project.name, None, [props.shown(scene, props.project_path(scene, project)),
                                        "  problem: same 3MF file as %s" % others, "  not written"]))
             continue
+        props.name_untitled_plates(project)
         spec, problems = project_spec(context, project, painted)
         if problems:
             jobs.append((project.name, None, [spec.shown(spec.path)] + ["  problem: %s" % p for p in problems] +
@@ -865,5 +1282,8 @@ class ORCA_OT_clear_log(bpy.types.Operator):
         return {'FINISHED'}
 
 
-classes = (ORCA_OT_list_action, ORCA_OT_copy_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink, ORCA_OT_overwrite, ORCA_OT_browse_root, ORCA_OT_browse_template,
-           ORCA_OT_import_project, ORCA_OT_update_from_3mf, ORCA_OT_build, ORCA_OT_cancel_build, ORCA_OT_clear_log)
+classes = (ORCA_OT_list_action, ORCA_OT_copy_action, ORCA_OT_add_parts, ORCA_OT_browse_part, ORCA_OT_relink,
+           ORCA_OT_overwrite, ORCA_OT_browse_root, ORCA_OT_browse_template, ORCA_OT_import_project,
+           ORCA_OT_update_from_3mf, ORCA_OT_add_from_combi, ORCA_OT_update_from_combi, ORCA_OT_own_setup,
+           ORCA_OT_load_profiles, ORCA_OT_apply_preset, ORCA_OT_object_setting, ORCA_OT_build,
+           ORCA_OT_cancel_build, ORCA_OT_clear_log)
